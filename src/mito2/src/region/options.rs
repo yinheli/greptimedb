@@ -17,6 +17,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+// TODO(niebayes): move common wal config to common_config.
+use common_meta::wal::kafka::KafkaTopic as Topic;
+use common_meta::wal::WalProvider;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
@@ -37,6 +40,10 @@ pub struct RegionOptions {
     pub compaction: CompactionOptions,
     /// Custom storage.
     pub storage: Option<String>,
+    /// Wal provider.
+    pub wal_provider: WalProvider,
+    /// Kafka topic.
+    pub topic: Option<Topic>,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -52,11 +59,14 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         let options: RegionOptionsWithoutEnum =
             serde_json::from_str(&json).context(JsonOptionsSnafu)?;
         let compaction: CompactionOptions = serde_json::from_str(&json).unwrap_or_default();
+        let wal_provider: WalProvider = serde_json::from_str(&json).unwrap_or_default();
 
         Ok(RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
+            wal_provider,
+            topic: options.topic,
         })
     }
 }
@@ -128,6 +138,7 @@ struct RegionOptionsWithoutEnum {
     #[serde(with = "humantime_serde")]
     ttl: Option<Duration>,
     storage: Option<String>,
+    topic: Option<Topic>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -136,6 +147,7 @@ impl Default for RegionOptionsWithoutEnum {
         RegionOptionsWithoutEnum {
             ttl: options.ttl,
             storage: options.storage,
+            topic: options.topic,
         }
     }
 }
@@ -161,6 +173,8 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use common_meta::ddl::create_table::{TOPIC_KEY, WAL_PROVIDER_KEY};
+
     use super::*;
 
     fn make_map(options: &[(&str, &str)]) -> HashMap<String, String> {
@@ -241,6 +255,8 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("storage", "S3"),
+            (WAL_PROVIDER_KEY, WalProvider::Kafka.to_string().as_str()),
+            (TOPIC_KEY, "test_topic"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -251,6 +267,8 @@ mod tests {
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
             storage: Some("s3".to_string()),
+            wal_provider: WalProvider::Kafka,
+            topic: Some("test_topic".to_string()),
         };
         assert_eq!(expect, options);
     }

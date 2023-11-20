@@ -155,7 +155,9 @@ impl RegionWriteCtx {
         &mut self,
         wal_writer: &mut WalWriter<S>,
     ) -> Result<()> {
-        wal_writer.add_entry(self.region_id, self.next_entry_id, &self.wal_entry)?;
+        // TODO(niebayes): Properly build log route accordingly to the specific wal provider.
+        let log_route = self.region_id.into();
+        wal_writer.add_entry(log_route, self.next_entry_id, &self.wal_entry)?;
         // We only call this method one time, but we still bump next entry id for consistency.
         self.next_entry_id += 1;
         Ok(())

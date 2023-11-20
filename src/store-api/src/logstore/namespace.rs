@@ -14,9 +14,9 @@
 
 use std::hash::Hash;
 
-// TODO(niebayes): maybe we should generialize Id.
 pub type Id = u64;
 
-pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + PartialEq + Eq {
+// TODO(niebayes): consider removing the Namespace trait.
+pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash {
     fn id(&self) -> Id;
 }

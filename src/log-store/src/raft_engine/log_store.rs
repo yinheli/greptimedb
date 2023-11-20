@@ -24,7 +24,7 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
-use store_api::logstore::{AppendResponse, LogStore};
+use store_api::logstore::{AppendResponse, LogRoute, LogStore};
 
 use crate::error;
 use crate::error::{
@@ -331,9 +331,9 @@ impl LogStore for RaftEngineLogStore {
         }
     }
 
-    fn namespace(&self, id: store_api::logstore::namespace::Id) -> Self::Namespace {
+    fn namespace(&self, log_route: LogRoute) -> Self::Namespace {
         Namespace {
-            id,
+            id: log_route.region_id.into(),
             ..Default::default()
         }
     }

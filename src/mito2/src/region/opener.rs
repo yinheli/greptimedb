@@ -18,20 +18,24 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
+use common_meta::wal::WalProvider;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
 use snafu::{ensure, OptionExt};
-use store_api::logstore::LogStore;
+use store_api::logstore::{LogRoute, LogStore};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
-use crate::error::{EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result};
+use crate::error::{
+    EmptyRegionDirSnafu, MissingRequiredKafkaTopicSnafu, ObjectStoreNotFoundSnafu,
+    RegionCorruptedSnafu, Result,
+};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
 use crate::region::options::RegionOptions;
@@ -212,6 +216,8 @@ impl RegionOpener {
             return Ok(None);
         };
 
+        // TODO(niebayes): Shall persist wal options in region manifest and restore it upon recovery.
+        // Maybe we should move building log store outside of `replay_memtable`.
         let manifest = manifest_manager.manifest().await;
         let metadata = manifest.metadata.clone();
 
@@ -230,11 +236,18 @@ impl RegionOpener {
             .flushed_sequence(manifest.flushed_sequence)
             .truncated_entry_id(manifest.truncated_entry_id)
             .compaction_time_window(manifest.compaction_time_window)
-            .options(region_options)
+            .options(region_options.clone())
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
+        replay_memtable(
+            wal,
+            region_id,
+            &region_options,
+            flushed_entry_id,
+            &version_control,
+        )
+        .await?;
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -332,6 +345,7 @@ pub(crate) fn check_recovered_region(
 async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
     region_id: RegionId,
+    region_options: &RegionOptions,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
 ) -> Result<()> {
@@ -340,7 +354,9 @@ async fn replay_memtable<S: LogStore>(
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
-    let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
+
+    let log_route = build_log_route(region_id, region_options)?;
+    let mut wal_stream = wal.scan(log_route, flushed_entry_id)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         last_entry_id = last_entry_id.max(entry_id);
@@ -363,6 +379,22 @@ async fn replay_memtable<S: LogStore>(
         region_id, rows_replayed, last_entry_id
     );
     Ok(())
+}
+
+fn build_log_route(region_id: RegionId, region_options: &RegionOptions) -> Result<LogRoute> {
+    match region_options.wal_provider {
+        WalProvider::RaftEngine => Ok(region_id.into()),
+        WalProvider::Kafka => {
+            let topic = region_options
+                .topic
+                .as_ref()
+                .context(MissingRequiredKafkaTopicSnafu)?;
+            Ok(LogRoute {
+                region_id,
+                topic: Some(topic.clone()),
+            })
+        }
+    }
 }
 
 /// Returns the directory to the manifest files.

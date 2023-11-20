@@ -14,7 +14,7 @@
 
 use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
-use store_api::logstore::{AppendResponse, LogStore};
+use store_api::logstore::{AppendResponse, LogRoute, LogStore};
 
 use crate::error::{Error, Result};
 
@@ -99,8 +99,8 @@ impl LogStore for NoopLogStore {
         EntryImpl
     }
 
-    fn namespace(&self, id: NamespaceId) -> Self::Namespace {
-        let _ = id;
+    fn namespace(&self, log_route: LogRoute) -> Self::Namespace {
+        let _ = log_route.region_id;
         NamespaceImpl
     }
 
@@ -117,6 +117,9 @@ impl LogStore for NoopLogStore {
 
 #[cfg(test)]
 mod tests {
+    use store_api::logstore::LogRoute;
+    use store_api::storage::RegionId;
+
     use super::*;
 
     #[test]
@@ -135,7 +138,13 @@ mod tests {
         store.create_namespace(&NamespaceImpl).await.unwrap();
         assert_eq!(0, store.list_namespaces().await.unwrap().len());
         store.delete_namespace(&NamespaceImpl).await.unwrap();
-        assert_eq!(NamespaceImpl, store.namespace(0));
+        assert_eq!(
+            NamespaceImpl,
+            store.namespace(LogRoute {
+                region_id: RegionId::from_u64(0),
+                topic: None,
+            })
+        );
         store.obsolete(NamespaceImpl, 1).await.unwrap();
     }
 }

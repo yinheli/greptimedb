@@ -38,8 +38,10 @@ use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::wal::kafka::KafkaTopic;
+use crate::wal::WalProvider;
 
-const TOPIC_KEY: &str = "kafka_topic";
+pub const WAL_PROVIDER_KEY: &str = "wal_provider";
+pub const TOPIC_KEY: &str = "kafka_topic";
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -200,14 +202,22 @@ impl CreateTableProcedure {
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
 
+                    let options = &mut create_region_request.options;
+
                     if let Some(region_topics) = region_topics {
                         // Safety: `TableMetadataAllocator` ensures the region routes and topics are of the same length.
                         // and hence the following indexing operation is safe.
                         assert_eq!(region_routes.len(), region_topics.len());
 
-                        create_region_request
-                            .options
-                            .insert(TOPIC_KEY.to_string(), region_topics[i].clone());
+                        options.extend([
+                            (WAL_PROVIDER_KEY.to_string(), WalProvider::Kafka.to_string()),
+                            (TOPIC_KEY.to_string(), region_topics[i].clone()),
+                        ]);
+                    } else {
+                        options.insert(
+                            WAL_PROVIDER_KEY.to_string(),
+                            WalProvider::RaftEngine.to_string(),
+                        );
                     }
 
                     PbRegionRequest::Create(create_region_request)

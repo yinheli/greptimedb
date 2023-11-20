@@ -24,8 +24,7 @@ use rskafka::record::{Record, RecordAndOffset};
 use snafu::ResultExt;
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
-use store_api::logstore::namespace::Id as NamespaceId;
-use store_api::logstore::{AppendResponse, LogStore};
+use store_api::logstore::{AppendResponse, LogRoute, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -161,7 +160,7 @@ impl LogStore for KafkaLogStore {
 
     // TODO(niebayes): refactor building namespace.
     /// Create a namespace of the associate Namespace type
-    fn namespace(&self, _ns_id: NamespaceId) -> Self::Namespace {
+    fn namespace(&self, _log_route: LogRoute) -> Self::Namespace {
         unimplemented!()
     }
 

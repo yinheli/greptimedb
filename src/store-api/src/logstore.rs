@@ -18,11 +18,39 @@ use common_error::ext::ErrorExt;
 
 use crate::logstore::entry::{Entry, Id as EntryId};
 use crate::logstore::entry_stream::SendableEntryStream;
-use crate::logstore::namespace::{Id as NamespaceId, Namespace};
+use crate::logstore::namespace::Namespace;
+use crate::storage::RegionId;
 
 pub mod entry;
 pub mod entry_stream;
 pub mod namespace;
+
+// TODO(niebayes): Move `Topic` def to common_wal or common_config.
+type Topic = String;
+
+// TODO(niebayes): Provide constructors for LogRoute.
+/// A struct containing necessary informations for routing wal operations.
+#[derive(Clone, Debug, Default)]
+pub struct LogRoute {
+    pub region_id: RegionId,
+    pub topic: Option<Topic>,
+}
+
+impl LogRoute {
+    fn with_region_id(region_id: RegionId) -> Self {
+        Self {
+            region_id,
+            ..Default::default()
+        }
+    }
+}
+
+// FIXME(niebayes): is it reasonable to implement this `From`?
+impl From<RegionId> for LogRoute {
+    fn from(region_id: RegionId) -> Self {
+        Self::with_region_id(region_id)
+    }
+}
 
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
@@ -64,7 +92,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`
-    fn namespace(&self, ns_id: NamespaceId) -> Self::Namespace;
+    fn namespace(&self, log_route: LogRoute) -> Self::Namespace;
 
     /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
     /// the log files if all entries inside are obsolete. This method may not delete log

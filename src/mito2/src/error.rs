@@ -25,6 +25,7 @@ use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
+use store_api::logstore::LogRoute;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
@@ -174,9 +175,9 @@ pub enum Error {
         source: datatypes::Error,
     },
 
-    #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
+    #[snafu(display("Failed to encode WAL entry, log_route: {:?}", log_route))]
     EncodeWal {
-        region_id: RegionId,
+        log_route: LogRoute,
         location: Location,
         #[snafu(source)]
         error: EncodeError,
@@ -188,24 +189,24 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
+    #[snafu(display("Failed to read WAL, log_route: {:?}", log_route))]
     ReadWal {
-        region_id: RegionId,
+        log_route: LogRoute,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
+    #[snafu(display("Failed to decode WAL entry, log_route: {:?}", log_route))]
     DecodeWal {
-        region_id: RegionId,
+        log_route: LogRoute,
         location: Location,
         #[snafu(source)]
         error: DecodeError,
     },
 
-    #[snafu(display("Failed to delete WAL, region_id: {}", region_id))]
+    #[snafu(display("Failed to delete WAL, log_route: {:?}", log_route))]
     DeleteWal {
-        region_id: RegionId,
+        log_route: LogRoute,
         location: Location,
         source: BoxedError,
     },
@@ -395,6 +396,9 @@ pub enum Error {
         error: ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Missing required topic in region options"))]
+    MissingRequiredKafkaTopic { location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -444,7 +448,8 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. } => StatusCode::Internal,
+            | DecodeWal { .. }
+            | MissingRequiredKafkaTopic { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),

@@ -16,12 +16,34 @@ pub mod kafka;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
 use crate::wal::kafka::KafkaOptions;
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum WalProvider {
+    #[default]
     RaftEngine,
     Kafka,
+}
+
+impl ToString for WalProvider {
+    fn to_string(&self) -> String {
+        match self {
+            WalProvider::RaftEngine => "RaftEngine".to_string(),
+            WalProvider::Kafka => "Kafka".to_string(),
+        }
+    }
+}
+
+impl TryFrom<WalProvider> for String {
+    type Error = Error;
+
+    fn try_from(wal_provider: WalProvider) -> Result<Self> {
+        match wal_provider {
+            WalProvider::RaftEngine => Ok("RaftEngine".to_string()),
+            WalProvider::Kafka => Ok("Kafka".to_string()),
+        }
+    }
 }
 
 // Options of different wal providers are integrated into the WalOptions.

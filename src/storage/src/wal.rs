@@ -20,7 +20,7 @@ use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, Location, ResultExt};
 use store_api::logstore::entry::{Entry, Id};
-use store_api::logstore::LogStore;
+use store_api::logstore::{LogRoute, LogStore};
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
@@ -55,7 +55,11 @@ impl<S: LogStore> Clone for Wal<S> {
 
 impl<S: LogStore> Wal<S> {
     pub fn new(region_id: RegionId, store: Arc<S>) -> Self {
-        let namespace = store.namespace(region_id.into());
+        let log_route = LogRoute {
+            region_id,
+            topic: None,
+        };
+        let namespace = store.namespace(log_route);
         Self {
             region_id,
             namespace,
