@@ -37,7 +37,7 @@ use crate::key::table_name::TableNameKey;
 use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::wal::kafka::KafkaTopic;
+use crate::wal::kafka::KafkaTopic as Topic;
 use crate::wal::WalProvider;
 
 pub const WAL_PROVIDER_KEY: &str = "wal_provider";
@@ -55,7 +55,7 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_topics: Option<Vec<KafkaTopic>>,
+        region_topics: Option<Vec<Topic>>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -82,6 +82,10 @@ impl CreateTableProcedure {
 
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
         &self.creator.data.region_routes
+    }
+
+    pub fn region_topics(&self) -> &Option<Vec<Topic>> {
+        &self.creator.data.region_topics
     }
 
     /// Checks whether the table exists.
@@ -261,6 +265,8 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         let region_routes = self.region_routes().clone();
+
+        // TODO(niebayes): Shall pass in the wal meta.
         manager
             .create_table_metadata(raw_table_info, region_routes)
             .await?;
@@ -316,7 +322,7 @@ impl TableCreator {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_topics: Option<Vec<KafkaTopic>>,
+        region_topics: Option<Vec<Topic>>,
     ) -> Self {
         Self {
             data: CreateTableData {
@@ -346,7 +352,7 @@ pub struct CreateTableData {
     pub task: CreateTableTask,
     pub cluster_id: u64,
     pub region_routes: Vec<RegionRoute>,
-    pub region_topics: Option<Vec<KafkaTopic>>,
+    pub region_topics: Option<Vec<Topic>>,
 }
 
 impl CreateTableData {

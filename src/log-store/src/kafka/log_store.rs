@@ -158,10 +158,10 @@ impl LogStore for KafkaLogStore {
         Ok(Box::pin(stream))
     }
 
-    // TODO(niebayes): refactor building namespace.
     /// Create a namespace of the associate Namespace type
-    fn namespace(&self, _log_route: LogRoute) -> Self::Namespace {
-        unimplemented!()
+    fn namespace(&self, log_route: LogRoute) -> Self::Namespace {
+        // Safety: the caller ensures the topic exists.
+        NamespaceImpl::new(log_route.region_id, log_route.topic.unwrap())
     }
 
     /// Create a new `Namespace`.

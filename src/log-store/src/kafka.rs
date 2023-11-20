@@ -35,21 +35,21 @@ const REGION_ID_KEY: &str = "region_id";
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct NamespaceImpl {
-    topic: Topic,
     region_id: RegionId,
+    topic: Topic,
 }
 
 impl NamespaceImpl {
-    pub fn new(topic: Topic, region_id: RegionId) -> Self {
-        Self { topic, region_id }
-    }
-
-    pub fn topic(&self) -> &Topic {
-        &self.topic
+    pub fn new(region_id: RegionId, topic: Topic) -> Self {
+        Self { region_id, topic }
     }
 
     pub fn region_id(&self) -> &RegionId {
         &self.region_id
+    }
+
+    pub fn topic(&self) -> &Topic {
+        &self.topic
     }
 }
 

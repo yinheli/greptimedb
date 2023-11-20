@@ -90,6 +90,7 @@ impl<S: LogStore> Wal<S> {
     }
 
     /// Mark entries whose ids `<= last_id` as deleted.
+    // TODO(niebayes): Properly build log route accordingly to wal provider and update usages accordingly.
     pub async fn obsolete(&self, log_route: LogRoute, last_id: EntryId) -> Result<()> {
         let namespace = self.store.namespace(log_route.clone());
         self.store

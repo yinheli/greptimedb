@@ -29,6 +29,7 @@ use crate::error::{self, Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::selector::SelectorOptions;
 
+// TODO(niebayes): Shall create a `WalMetaAllocator` which allocates a `WalMeta` on request based on wal options.
 pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,

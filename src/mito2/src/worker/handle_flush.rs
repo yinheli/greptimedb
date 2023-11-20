@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
-use store_api::logstore::{LogRoute, LogStore};
+use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
@@ -201,11 +201,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Region {} flush finished, tries to bump wal to {}",
             region_id, request.flushed_entry_id
         );
-        let log_route = LogRoute {
-            region_id,
-            ..Default::default()
-        };
-        if let Err(e) = self.wal.obsolete(log_route, request.flushed_entry_id).await {
+        // TODO(niebayes): Properly build log route accordingly to the wal provider.
+        if let Err(e) = self
+            .wal
+            .obsolete(region_id.into(), request.flushed_entry_id)
+            .await
+        {
             error!(e; "Failed to write wal, region: {}", region_id);
             request.on_failure(e);
             return;

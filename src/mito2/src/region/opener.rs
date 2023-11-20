@@ -358,6 +358,7 @@ async fn replay_memtable<S: LogStore>(
     let log_route = build_log_route(region_id, region_options)?;
     let mut wal_stream = wal.scan(log_route, flushed_entry_id)?;
     while let Some(res) = wal_stream.next().await {
+        // FIXME(niebayes): Log store implementation is responsible for mapping kafka offset to entry id.
         let (entry_id, entry) = res?;
         last_entry_id = last_entry_id.max(entry_id);
         for mutation in entry.mutations {
