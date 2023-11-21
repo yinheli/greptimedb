@@ -23,6 +23,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{Error, Result, WriteGroupSnafu};
 use crate::memtable::KeyValues;
+use crate::region::opener::build_log_route;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
 use crate::wal::{EntryId, WalWriter};
@@ -155,8 +156,7 @@ impl RegionWriteCtx {
         &mut self,
         wal_writer: &mut WalWriter<S>,
     ) -> Result<()> {
-        // TODO(niebayes): Properly build log route accordingly to the specific wal provider.
-        let log_route = self.region_id.into();
+        let log_route = build_log_route(self.region_id, &self.version.options)?;
         wal_writer.add_entry(log_route, self.next_entry_id, &self.wal_entry)?;
         // We only call this method one time, but we still bump next entry id for consistency.
         self.next_entry_id += 1;

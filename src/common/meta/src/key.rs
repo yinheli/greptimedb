@@ -394,7 +394,7 @@ impl TableMetadataManager {
 
         // Creates datanode table key value pairs.
         let distribution = region_distribution(&region_routes)?;
-        // TODO(niebayes): Shall seperate region options for each region.
+        // TODO(niebayes): Shall separate region options for each region.
         // Maybe we should seperate region common options and region specific options.
         let create_datanode_table_txn = self.datanode_table_manager().build_create_txn(
             table_id,

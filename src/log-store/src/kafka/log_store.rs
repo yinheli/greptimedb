@@ -21,15 +21,15 @@ use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::record::{Record, RecordAndOffset};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::{AppendResponse, LogRoute, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{
-    ConvertEntryIdToOffsetSnafu, Error, GetKafkaTopicClientSnafu, ReadRecordFromKafkaSnafu, Result,
-    WriteEntriesToKafkaSnafu,
+    ConvertEntryIdToOffsetSnafu, EmptyKafkaOffsetsSnafu, EmptyLogEntriesSnafu, Error,
+    GetKafkaTopicClientSnafu, ReadRecordFromKafkaSnafu, Result, WriteEntriesToKafkaSnafu,
 };
 use crate::kafka::topic_client_manager::{TopicClientManager, TopicClientManagerRef};
 use crate::kafka::{EntryImpl, NamespaceImpl};
@@ -48,11 +48,18 @@ impl KafkaLogStore {
         })
     }
 
-    async fn publish_entries_to_topic(&self, entries: Vec<EntryImpl>, topic: Topic) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let region_id = *entries.first().unwrap().ns.region_id();
+    /// Publishes a sequence of log entries to a given Kafka topic, return the start offset of the first log entry.
+    async fn publish_entries_to_topic(
+        &self,
+        entries: Vec<EntryImpl>,
+        topic: Topic,
+    ) -> Result<AppendResponse> {
+        // Safety: the caller ensures the input entries is not empty.
+        assert!(!entries.is_empty());
+
+        let first_entry = entries.first().unwrap();
+        let first_entry_id = first_entry.id;
+        let region_id = *first_entry.ns.region_id();
 
         let topic_client = self
             .topic_client_manager
@@ -72,10 +79,15 @@ impl KafkaLogStore {
             .map(|record| producer.produce(record))
             .collect::<Vec<_>>();
 
-        futures::future::try_join_all(produce_tasks)
+        let offsets = futures::future::try_join_all(produce_tasks)
             .await
-            .context(WriteEntriesToKafkaSnafu { topic, region_id })
-            .map(|_| ())
+            .context(WriteEntriesToKafkaSnafu { topic, region_id })?;
+        let start_offset = offsets.first().context(EmptyKafkaOffsetsSnafu)?;
+
+        Ok(AppendResponse {
+            entry_id: first_entry_id,
+            offset: Some(*start_offset),
+        })
     }
 }
 
@@ -98,16 +110,14 @@ impl LogStore for KafkaLogStore {
     /// Append an `Entry` to WAL with given namespace and return append response containing
     /// the entry id.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        let entry_id = entry.id;
         let topic = entry.ns.topic().clone();
-
-        self.publish_entries_to_topic(vec![entry], topic)
-            .await
-            .map(|_| AppendResponse { entry_id })
+        self.publish_entries_to_topic(vec![entry], topic).await
     }
 
     /// Append a batch of entries.
-    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<()> {
+    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendResponse> {
+        let first_entry_id = entries.first().context(EmptyLogEntriesSnafu)?.id;
+
         let mut topic_entries: HashMap<String, Vec<_>> = HashMap::new();
         for entry in entries {
             topic_entries
@@ -120,10 +130,24 @@ impl LogStore for KafkaLogStore {
             .into_iter()
             .map(|(topic, entries)| self.publish_entries_to_topic(entries, topic))
             .collect::<Vec<_>>();
+        let responses = futures::future::try_join_all(publish_tasks).await?;
 
-        futures::future::try_join_all(publish_tasks)
-            .await
-            .map(|_| ())
+        // The returned responses are reordered by topic and hence it's necessary to find the minimum offset manually.
+        let start_offset = responses
+            .into_iter()
+            .map(|response|
+                // Safety: the offset must be Some in Kafka log store.
+                response.offset.unwrap())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .min();
+        // Safety: there must be at least one response since the input entries is guaranteed not being empty.
+        assert!(start_offset.is_some());
+
+        Ok(AppendResponse {
+            entry_id: first_entry_id,
+            offset: start_offset,
+        })
     }
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids

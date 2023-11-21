@@ -216,8 +216,7 @@ impl RegionOpener {
             return Ok(None);
         };
 
-        // TODO(niebayes): Shall persist wal options in region manifest and restore it upon recovery.
-        // Maybe we should move building log store outside of `replay_memtable`.
+        // TODO(niebayes): restore kafka offset.
         let manifest = manifest_manager.manifest().await;
         let metadata = manifest.metadata.clone();
 
@@ -382,7 +381,8 @@ async fn replay_memtable<S: LogStore>(
     Ok(())
 }
 
-fn build_log_route(region_id: RegionId, region_options: &RegionOptions) -> Result<LogRoute> {
+// TODO(niebayes): move `build_log_store` to another appropriate crate.
+pub fn build_log_route(region_id: RegionId, region_options: &RegionOptions) -> Result<LogRoute> {
     match region_options.wal_provider {
         WalProvider::RaftEngine => Ok(region_id.into()),
         WalProvider::Kafka => {

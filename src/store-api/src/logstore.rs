@@ -27,9 +27,9 @@ pub mod namespace;
 
 // TODO(niebayes): Move `Topic` def to common_wal or common_config.
 type Topic = String;
+pub type KafkaOffset = i64;
 
-// TODO(niebayes): Provide constructors for LogRoute.
-/// A struct containing necessary informations for routing wal operations.
+/// LogRoute contains necessary information for routing wal operations.
 #[derive(Clone, Debug, Default)]
 pub struct LogRoute {
     pub region_id: RegionId,
@@ -62,12 +62,11 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Stop components of logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
-    /// Append an `Entry` to WAL with given namespace and return append response containing
-    /// the entry id.
+    /// Append an `Entry` to WAL with given namespace and return a response.
     async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
-    /// Append a batch of entries atomically and return the offset of first entry.
-    async fn append_batch(&self, e: Vec<Self::Entry>) -> Result<(), Self::Error>;
+    /// Append a batch of entries and return a response.
+    async fn append_batch(&self, e: Vec<Self::Entry>) -> Result<AppendResponse, Self::Error>;
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
@@ -92,6 +91,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`
+    // TODO(niebayes): rewrite by taking as input region id and log options where log options is stored as a hashmap in the region options.
     fn namespace(&self, log_route: LogRoute) -> Self::Namespace;
 
     /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
@@ -100,7 +100,11 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 }
 
-#[derive(Debug)]
+// TODO(niebayes): Define an `AppendBatchResponse` to store a set of offsets where each offset corresponds to a topic.
+#[derive(Debug, Default)]
 pub struct AppendResponse {
+    /// The logical entry id of the first log entry appended.
     pub entry_id: EntryId,
+    /// The physical offset in the log store of the first log entry appended.
+    pub offset: Option<i64>,
 }

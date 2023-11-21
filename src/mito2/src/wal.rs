@@ -25,7 +25,7 @@ use futures::StreamExt;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
-use store_api::logstore::{LogRoute, LogStore};
+use store_api::logstore::{AppendResponse, LogRoute, LogStore};
 
 use crate::error::{
     DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu,
@@ -147,7 +147,7 @@ impl<S: LogStore> WalWriter<S> {
     }
 
     /// Write all buffered entries to the WAL.
-    pub async fn write_to_wal(&mut self) -> Result<()> {
+    pub async fn write_to_wal(&mut self) -> Result<AppendResponse> {
         // TODO(yingwen): metrics.
 
         let entries = mem::take(&mut self.entries);

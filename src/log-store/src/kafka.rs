@@ -18,24 +18,25 @@ use std::collections::BTreeMap;
 
 use common_meta::wal::kafka::KafkaTopic as Topic;
 use rskafka::record::Record;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::storage::RegionId;
 
 use crate::error::{
-    DeserEntryIdSnafu, DeserRegionIdSnafu, DeserTopicSnafu, Error, MissingEntryIdSnafu,
-    MissingRecordValueSnafu, MissingRegionIdSnafu, MissingTopicSnafu, Result, SerEntryIdSnafu,
-    SerRegionIdSnafu, SerTopicSnafu,
+    DeserEntryMetaSnafu, Error, MissingEntryMetaSnafu, MissingRecordValueSnafu, Result,
+    SerEntryMetaSnafu,
 };
 
-const ENTRY_ID_KEY: &str = "entry_id";
-const TOPIC_KEY: &str = "topic";
-const REGION_ID_KEY: &str = "region_id";
+const ENTRY_META_KEY: &str = "entry_meta";
 
+// TODO(niebayes): Limit public scope.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct NamespaceImpl {
+    /// The associated region id.
     region_id: RegionId,
+    /// The allocated Kafka topic.
     topic: Topic,
 }
 
@@ -60,8 +61,11 @@ impl Namespace for NamespaceImpl {
 }
 
 pub struct EntryImpl {
+    /// Entry payload.
     data: Vec<u8>,
+    /// The logical entry id.
     id: EntryId,
+    /// The namespace used to identify and isolate log entries from different regions.
     pub ns: NamespaceImpl,
 }
 
@@ -92,30 +96,29 @@ impl Entry for EntryImpl {
     }
 }
 
+/// The entry meta is used to group metadata during serialization and deserialization.
+#[derive(Serialize, Deserialize)]
+struct EntryMeta {
+    entry_id: EntryId,
+    region_id: RegionId,
+    topic: String,
+}
+
 impl TryInto<Record> for EntryImpl {
     type Error = Error;
 
     fn try_into(self) -> Result<Record> {
-        let entry_id = self.id;
-        let topic = self.ns.topic();
-        let region_id = self.ns.region_id();
-
-        let raw_entry_id = serde_json::to_vec(&entry_id).context(SerEntryIdSnafu { entry_id })?;
-        let raw_topic = serde_json::to_vec(topic).context(SerTopicSnafu { topic })?;
-        let raw_region_id = serde_json::to_vec(region_id).context(SerRegionIdSnafu {
-            region_id: *region_id,
-        })?;
-
-        let headers = BTreeMap::from([
-            (ENTRY_ID_KEY.to_string(), raw_entry_id),
-            (TOPIC_KEY.to_string(), raw_topic),
-            (REGION_ID_KEY.to_string(), raw_region_id),
-        ]);
+        let entry_meta = EntryMeta {
+            entry_id: self.id,
+            region_id: *self.ns.region_id(),
+            topic: self.ns.topic,
+        };
+        let raw_entry_meta = serde_json::to_vec(&entry_meta).context(SerEntryMetaSnafu)?;
 
         Ok(Record {
             key: None,
             value: Some(self.data),
-            headers,
+            headers: BTreeMap::from([(ENTRY_META_KEY.to_string(), raw_entry_meta)]),
             timestamp: rskafka::chrono::Utc::now(),
         })
     }
@@ -129,31 +132,26 @@ impl TryFrom<Record> for EntryImpl {
             record: record.clone(),
         })?;
 
-        let headers = &record.headers;
-        let raw_entry_id = headers.get(REGION_ID_KEY).context(MissingEntryIdSnafu {
-            record: record.clone(),
-        })?;
-        let raw_topic = headers.get(TOPIC_KEY).context(MissingTopicSnafu {
-            record: record.clone(),
-        })?;
-        let raw_region_id = headers.get(REGION_ID_KEY).context(MissingRegionIdSnafu {
+        let raw_entry_meta = record
+            .headers
+            .get(ENTRY_META_KEY)
+            .context(MissingEntryMetaSnafu {
+                record: record.clone(),
+            })?;
+        let entry_meta = serde_json::from_slice(raw_entry_meta).context(DeserEntryMetaSnafu {
             record: record.clone(),
         })?;
 
-        let entry_id = serde_json::from_slice(raw_entry_id).context(DeserEntryIdSnafu {
-            record: record.clone(),
-        })?;
-        let topic = serde_json::from_slice(raw_topic).context(DeserTopicSnafu {
-            record: record.clone(),
-        })?;
-        let region_id = serde_json::from_slice(raw_region_id).context(DeserRegionIdSnafu {
-            record: record.clone(),
-        })?;
+        let EntryMeta {
+            entry_id,
+            region_id,
+            topic,
+        } = entry_meta;
 
         Ok(Self {
             data: value.clone(),
             id: entry_id,
-            ns: NamespaceImpl::new(topic, region_id),
+            ns: NamespaceImpl::new(region_id, topic),
         })
     }
 }

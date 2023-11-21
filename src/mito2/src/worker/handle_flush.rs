@@ -173,6 +173,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         }
 
+        // TODO(niebayes): Properly persist kafka offset.
         // Write region edit to manifest.
         let edit = RegionEdit {
             files_to_add: std::mem::take(&mut request.file_metas),

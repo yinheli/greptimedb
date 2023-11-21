@@ -73,6 +73,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_ctx.set_error(e);
                 }
             }
+            // TODO(niebayes): let `write_to_wal` being called inside region context so that
+            // we can update entry id and kakfa offset properly.
             if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
                 // Failed to write wal.
                 for mut region_ctx in region_ctxs.into_values() {

@@ -191,6 +191,7 @@ pub(crate) struct VersionControlData {
     pub(crate) is_dropped: bool,
 }
 
+// TODO(niebayes): rebase `removing storage` to eliminate handle seq num.
 /// Static metadata of a region.
 #[derive(Clone, Debug)]
 pub(crate) struct Version {

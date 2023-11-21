@@ -151,79 +151,40 @@ pub enum Error {
         error: rskafka::client::producer::Error,
     },
 
-    #[snafu(display("Failed to serialize a region id, region id: {}", region_id))]
-    SerRegionId {
-        region_id: RegionId,
+    #[snafu(display("Empty log entries provided"))]
+    EmptyLogEntries { location: Location },
+
+    #[snafu(display("Returned Kafka offsets are empty"))]
+    EmptyKafkaOffsets { location: Location },
+
+    #[snafu(display("Failed to serialize an entry meta"))]
+    SerEntryMeta {
         location: Location,
         #[snafu(source)]
         error: serde_json::Error,
     },
 
-    #[snafu(display("Failed to deserialize a region id from a record {:?}", record))]
-    DeserRegionId {
-        record: rskafka::record::Record,
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
-    #[snafu(display("Failed to serialize an entry id, entry id: {}", entry_id))]
-    SerEntryId {
-        entry_id: EntryId,
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
-    #[snafu(display("Failed to deserialize an entry id from a record {:?}", record))]
-    DeserEntryId {
-        record: rskafka::record::Record,
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
-    #[snafu(display("Failed to serialize a topic, topic: {}", topic))]
-    SerTopic {
-        topic: KafkaTopic,
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
-    #[snafu(display("Failed to deserialize a topic from a record {:?}", record))]
-    DeserTopic {
-        record: rskafka::record::Record,
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
-    #[snafu(display("Missing required value in a record {:?}", record))]
+    #[snafu(display("Missing required value in a record, record: {:?}", record))]
     MissingRecordValue {
         record: rskafka::record::Record,
         location: Location,
     },
 
+    #[snafu(display("Missing required entry meta in a record header, record: {:?}", record))]
+    MissingEntryMeta {
+        record: rskafka::record::Record,
+        location: Location,
+    },
+
     #[snafu(display(
-        "Missing required entry id header in a record header, record: {:?}",
+        "Failed to deserialize an entry meta from the record header, record: {:?}",
         record
     ))]
-    MissingEntryId {
+    DeserEntryMeta {
         record: rskafka::record::Record,
         location: Location,
-    },
-
-    #[snafu(display("Missing required topic in a record header, record: {:?}", record))]
-    MissingTopic {
-        record: rskafka::record::Record,
-        location: Location,
-    },
-
-    #[snafu(display("Missing required region id in a record header, record: {:?}", record))]
-    MissingRegionId {
-        record: rskafka::record::Record,
-        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
     },
 
     #[snafu(display(

@@ -178,16 +178,20 @@ impl LogStore for RaftEngineLogStore {
             .engine
             .write(&mut batch, self.opts.sync_write)
             .context(RaftEngineSnafu)?;
-        Ok(AppendResponse { entry_id })
+        Ok(AppendResponse {
+            entry_id,
+            offset: None,
+        })
     }
 
     /// Append a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
-    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<()> {
+    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendResponse> {
         ensure!(self.started(), IllegalStateSnafu);
-        if entries.is_empty() {
-            return Ok(());
-        }
+
+        // Safety: the caller ensures the input entries is not empty.
+        assert!(!entries.is_empty());
+        let first_entry_id = entries.first().unwrap().id();
 
         let mut batch = LogBatch::with_capacity(entries.len());
 
@@ -203,7 +207,10 @@ impl LogStore for RaftEngineLogStore {
             .engine
             .write(&mut batch, self.opts.sync_write)
             .context(RaftEngineSnafu)?;
-        Ok(())
+        Ok(AppendResponse {
+            entry_id: first_entry_id,
+            offset: None,
+        })
     }
 
     /// Create a stream of entries from logstore in the given namespace. The end of stream is

@@ -124,7 +124,7 @@ impl TopicClientManager {
     }
 }
 
-// TODO(niebayes): add backoff on listing topics.
+// TODO(niebayes): add backoff on checking topics.
 async fn check_topics_ready(kafka_client: &Client, opts: &KafkaOptions) -> Result<bool> {
     let expected_topics = (0..opts.num_topics)
         .map(|topic_id| format!("{}_{}", opts.topic_name_prefix, topic_id))
