@@ -492,17 +492,7 @@ mod tests {
 
             [storage]
             type = "S3"
-            access_key_id = "access_key_id"
-            secret_access_key = "secret_access_key"
-
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
-
-            [storage.manifest]
-            checkpoint_margin = 9
-            gc_duration = '7s'
+            data_home = "/tmp/greptimedb/"
 
             [http]
             addr = "127.0.0.1:4000"

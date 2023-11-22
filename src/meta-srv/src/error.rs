@@ -699,7 +699,8 @@ impl ErrorExt for Error {
 
             Error::InitMetadata { source, .. } => source.status_code(),
 
-            Error::BuildWalMetaAllocator { source, .. } => source.status_code(),
+            Error::BuildKafkaTopicManager { source, .. }
+            | Error::BuildWalMetaAllocator { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
         }

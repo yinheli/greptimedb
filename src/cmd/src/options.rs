@@ -226,6 +226,7 @@ mod tests {
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
+                        "raft_engine_opts".to_uppercase(),
                         "dir".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),

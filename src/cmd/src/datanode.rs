@@ -379,7 +379,6 @@ mod tests {
             provider = "RaftEngine"
 
             [wal.raft_engine_opts]
-            dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -409,20 +408,22 @@ mod tests {
         temp_env::with_vars(
             [
                 (
-                    // wal.purge_interval = 1m
+                    // wal.raft_engine_opts.purge_interval = 1m
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
+                        "raft_engine_opts".to_uppercase(),
                         "purge_interval".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
                     Some("1m"),
                 ),
                 (
-                    // wal.read_batch_size = 100
+                    // wal.raft_engine_opts.read_batch_size = 100
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
+                        "raft_engine_opts".to_uppercase(),
                         "read_batch_size".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -454,7 +455,8 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.wal.read_batch_size, 100,);
+                let raft_engine_opts = opts.wal.raft_engine_opts.unwrap();
+                assert_eq!(raft_engine_opts.read_batch_size, 100);
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -465,10 +467,13 @@ mod tests {
                 );
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.wal.purge_interval, Duration::from_secs(60 * 10));
+                assert_eq!(
+                    raft_engine_opts.purge_interval,
+                    Duration::from_secs(60 * 10)
+                );
 
                 // Should be read from cli, cli > config file > env > default values.
-                let wal_dir = opts.wal.raft_engine_opts.unwrap().dir.unwrap();
+                let wal_dir = raft_engine_opts.dir.unwrap();
                 assert_eq!(wal_dir, "/other/wal/dir");
 
                 // Should be default value.
