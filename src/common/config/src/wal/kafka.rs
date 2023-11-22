@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use rskafka::client::partition::Compression as RsKafkaCompression;
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +39,7 @@ impl From<Compression> for RsKafkaCompression {
     }
 }
 
-// TODO(niebayes): update config file accordingly.
+// TODO(niebayes): Update tests on Datanode options that includes wal options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KafkaOptions {
@@ -53,11 +54,13 @@ pub struct KafkaOptions {
     /// The compression algorithm used to compress log entries.
     pub compression: Compression,
     /// The maximum log size an rskakfa batch producer could buffer.
-    pub max_batch_size: usize,
+    pub max_batch_size: ReadableSize,
     /// The linger duration of an rskafka batch producer.
+    #[serde(with = "humantime_serde")]
     pub linger: Duration,
-    /// The maximum amount of time (in milliseconds) to wait for Kafka records before returning.
-    pub max_wait_time: i32,
+    /// The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
+    #[serde(with = "humantime_serde")]
+    pub max_wait_time: Duration,
 }
 
 impl Default for KafkaOptions {
@@ -65,12 +68,12 @@ impl Default for KafkaOptions {
         Self {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 64,
-            topic_name_prefix: "gt_kafka_topic".to_string(),
+            topic_name_prefix: "greptime_kafka_topic".to_string(),
             num_partitions: 1,
             compression: Compression::NoCompression,
-            max_batch_size: 4 * 1024 * 1024,    // 4MB.
-            linger: Duration::from_millis(200), // 200ms.
-            max_wait_time: 100,                 // 100ms.
+            max_batch_size: ReadableSize::mb(4),       // 4MB.
+            linger: Duration::from_millis(200),        // 200ms.
+            max_wait_time: Duration::from_millis(100), // 100ms.
         }
     }
 }

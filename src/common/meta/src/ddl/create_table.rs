@@ -192,6 +192,11 @@ impl CreateTableProcedure {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
 
             let regions = find_leader_regions(region_routes, &datanode);
+            // Safety: `TableMetadataAllocator` ensures the region routes and topics are of the same length.
+            // Besides, `find_leader_regions` may filter out some regions. Therefore, the following condition must be met
+            // and the indexing on `region_topics` is safe definitely.
+            assert!(regions.len() <= region_topics.len());
+
             let requests = regions
                 .iter()
                 .enumerate()
@@ -202,14 +207,10 @@ impl CreateTableProcedure {
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
 
-                    let options = &mut create_region_request.options;
-
                     if !region_topics.is_empty() {
-                        // Safety: `TableMetadataAllocator` ensures the region routes and topics are of the same length.
-                        // and hence the following indexing operation is safe.
-                        assert_eq!(region_routes.len(), region_topics.len());
-
-                        options.insert(TOPIC_KEY.to_string(), region_topics[i].clone());
+                        create_region_request
+                            .options
+                            .insert(TOPIC_KEY.to_string(), region_topics[i].clone());
                     }
 
                     PbRegionRequest::Create(create_region_request)

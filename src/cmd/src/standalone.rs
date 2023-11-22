@@ -482,8 +482,13 @@ mod tests {
 
             [wal.kafka_opts]
             broker_endpoints = ["127.0.0.1:9090"]
-            topic_name_prefix = "gt_kafka_topic"
+            num_topics = 64
+            topic_name_prefix = "greptime_kafka_topic"
             num_partitions = 1
+            compression = "Lz4"
+            max_batch_size = "4MB"
+            linger = "200ms"
+            max_wait_time = "100ms"
 
             [storage]
             type = "S3"

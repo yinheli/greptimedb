@@ -181,6 +181,16 @@ mod tests {
             read_batch_size = 128
             sync_write = false
 
+            [wal.kafka_opts]
+            broker_endpoints = ["127.0.0.1:9090"]
+            num_topics = 64
+            topic_name_prefix = "greptime_kafka_topic"
+            num_partitions = 1
+            compression = "Lz4"
+            max_batch_size = "4MB"
+            linger = "200ms"
+            max_wait_time = "100ms"
+
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"

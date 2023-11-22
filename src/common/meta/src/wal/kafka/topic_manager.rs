@@ -28,7 +28,7 @@ use crate::wal::kafka::KafkaOptions;
 
 pub type Topic = String;
 
-const TOPICS_KEY: &str = "gt_kafka_topics";
+const TOPICS_KEY: &str = "greptime_kafka_topics";
 const CREATE_TOPIC_TIMEOUT: i32 = 5_000; // 5,000 ms.
 
 pub struct TopicManager {

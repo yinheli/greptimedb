@@ -46,7 +46,8 @@ pub type TopicClientRef = Arc<TopicClient>;
 
 impl TopicClient {
     pub fn new(raw_client: Arc<PartitionClient>, kafka_opts: &KafkaOptions) -> Self {
-        let record_aggregator = RecordAggregator::new(kafka_opts.max_batch_size);
+        let record_aggregator =
+            RecordAggregator::new(kafka_opts.max_batch_size.as_bytes() as usize);
         let batch_producer = BatchProducerBuilder::new(raw_client.clone())
             .with_compression(kafka_opts.compression.clone().into())
             .with_linger(kafka_opts.linger)

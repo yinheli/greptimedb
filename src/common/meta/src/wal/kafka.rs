@@ -21,6 +21,7 @@ pub use topic_manager::{Topic as KafkaTopic, TopicManager as KafkaTopicManager};
 use crate::wal::kafka::topic_selector::TopicSelectorType;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct KafkaOptions {
     /// The broker endpoints of the Kafka cluster.
     broker_endpoints: Vec<String>,
@@ -42,7 +43,7 @@ impl Default for KafkaOptions {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "gt_kafka_topic".to_string(),
+            topic_name_prefix: "greptime_kafka_topic".to_string(),
             num_partitions: 1,
             replication_factor: 3,
         }

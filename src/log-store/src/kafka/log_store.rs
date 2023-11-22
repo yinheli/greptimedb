@@ -168,8 +168,8 @@ impl LogStore for KafkaLogStore {
             .raw_client
             .clone();
         let mut stream_consumer = StreamConsumerBuilder::new(raw_client, StartOffset::At(offset))
-            .with_max_batch_size(self.opts.max_batch_size as i32)
-            .with_max_wait_ms(self.opts.max_wait_time)
+            .with_max_batch_size(self.opts.max_batch_size.as_bytes() as i32)
+            .with_max_wait_ms(self.opts.max_wait_time.as_millis() as i32)
             .build();
 
         // TODO(niebayes): we may also need a buffering mechanism on fetching entries since the mapping between
