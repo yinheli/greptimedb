@@ -327,6 +327,9 @@ pub enum Error {
         #[snafu(source)]
         error: RsKafkaError,
     },
+
+    #[snafu(display("Missing required Kafka topic manager"))]
+    MissingKafkaTopicManager { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -385,15 +388,16 @@ impl ErrorExt for Error {
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
 
-            Error::MissingKafkaOpts { .. }
-            | Error::DeserKafkaTopics { .. }
+            Error::DeserKafkaTopics { .. }
             | Error::SerKafkaTopics { .. }
             | Error::PersistKafkaTopics { .. }
             | Error::InvalidNumTopics { .. }
             | Error::BuildKafkaClient { .. }
             | Error::BuildKafkaCtrlClient { .. }
             | Error::TooManyCreatedKafkaTopics { .. }
-            | Error::CreateKafkaTopic { .. } => StatusCode::Unexpected,
+            | Error::CreateKafkaTopic { .. }
+            | Error::MissingKafkaOpts { .. }
+            | Error::MissingKafkaTopicManager { .. } => StatusCode::Unexpected,
         }
     }
 

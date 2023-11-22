@@ -1603,6 +1603,7 @@ name = "common-config"
 version = "0.4.3"
 dependencies = [
  "common-base",
+ "common-meta",
  "humantime-serde",
  "rskafka",
  "serde",

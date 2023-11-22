@@ -15,12 +15,12 @@
 use std::collections::HashSet;
 
 use rskafka::client::ClientBuilder;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaTopicSnafu, DeserKafkaTopicsSnafu,
-    InvalidNumTopicsSnafu, MissingKafkaOptsSnafu, PersistKafkaTopicsSnafu, Result,
-    SerKafkaTopicsSnafu, TooManyCreatedKafkaTopicsSnafu,
+    InvalidNumTopicsSnafu, PersistKafkaTopicsSnafu, Result, SerKafkaTopicsSnafu,
+    TooManyCreatedKafkaTopicsSnafu,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::topic_selector::{build_topic_selector, TopicSelectorRef};
@@ -37,20 +37,15 @@ pub struct TopicManager {
 }
 
 impl TopicManager {
-    pub async fn try_new(
-        kafka_opts: &Option<KafkaOptions>,
-        kv_backend: &KvBackendRef,
-    ) -> Result<Self> {
-        let opts = kafka_opts.as_ref().context(MissingKafkaOptsSnafu)?;
-
+    pub async fn try_new(opts: &KafkaOptions, kv_backend: &KvBackendRef) -> Result<Self> {
         Ok(Self {
             topic_pool: build_topic_pool(opts, kv_backend).await?,
             topic_selector: build_topic_selector(&opts.selector_type),
         })
     }
 
-    pub fn select_topics(&self, num_regions: usize) -> Vec<Topic> {
-        (0..num_regions)
+    pub fn select_topics(&self, num_topics: usize) -> Vec<Topic> {
+        (0..num_topics)
             .map(|_| self.topic_selector.select(&self.topic_pool))
             .collect()
     }

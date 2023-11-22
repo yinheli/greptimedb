@@ -37,9 +37,9 @@ use crate::key::table_name::TableNameKey;
 use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::wal::kafka::KafkaTopic as Topic;
-use crate::wal::WalProvider;
+use crate::wal::meta::WalMeta;
 
+// TODO(niebayes): remove `WAL_PROVIDER_KEY` since there's no need to store wal provider in the region options any more.
 pub const WAL_PROVIDER_KEY: &str = "wal_provider";
 pub const TOPIC_KEY: &str = "kafka_topic";
 
@@ -55,12 +55,12 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_topics: Option<Vec<Topic>>,
+        wal_meta: WalMeta,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task, region_routes, region_topics),
+            creator: TableCreator::new(cluster_id, task, region_routes, wal_meta),
         }
     }
 
@@ -82,10 +82,6 @@ impl CreateTableProcedure {
 
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
         &self.creator.data.region_routes
-    }
-
-    pub fn region_topics(&self) -> &Option<Vec<Topic>> {
-        &self.creator.data.region_topics
     }
 
     /// Checks whether the table exists.
@@ -180,7 +176,7 @@ impl CreateTableProcedure {
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
-        let region_topics = create_table_data.region_topics.as_ref();
+        let region_topics = &create_table_data.wal_meta.region_topics;
 
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
@@ -208,20 +204,12 @@ impl CreateTableProcedure {
 
                     let options = &mut create_region_request.options;
 
-                    if let Some(region_topics) = region_topics {
+                    if !region_topics.is_empty() {
                         // Safety: `TableMetadataAllocator` ensures the region routes and topics are of the same length.
                         // and hence the following indexing operation is safe.
                         assert_eq!(region_routes.len(), region_topics.len());
 
-                        options.extend([
-                            (WAL_PROVIDER_KEY.to_string(), WalProvider::Kafka.to_string()),
-                            (TOPIC_KEY.to_string(), region_topics[i].clone()),
-                        ]);
-                    } else {
-                        options.insert(
-                            WAL_PROVIDER_KEY.to_string(),
-                            WalProvider::RaftEngine.to_string(),
-                        );
+                        options.insert(TOPIC_KEY.to_string(), region_topics[i].clone());
                     }
 
                     PbRegionRequest::Create(create_region_request)
@@ -322,7 +310,7 @@ impl TableCreator {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_topics: Option<Vec<Topic>>,
+        wal_meta: WalMeta,
     ) -> Self {
         Self {
             data: CreateTableData {
@@ -330,7 +318,7 @@ impl TableCreator {
                 cluster_id,
                 task,
                 region_routes,
-                region_topics,
+                wal_meta,
             },
         }
     }
@@ -352,7 +340,7 @@ pub struct CreateTableData {
     pub task: CreateTableTask,
     pub cluster_id: u64,
     pub region_routes: Vec<RegionRoute>,
-    pub region_topics: Option<Vec<Topic>>,
+    pub wal_meta: WalMeta,
 }
 
 impl CreateTableData {

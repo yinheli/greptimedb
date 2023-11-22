@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod kafka;
+pub mod meta;
 
 use serde::{Deserialize, Serialize};
 
