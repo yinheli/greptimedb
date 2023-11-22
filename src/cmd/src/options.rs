@@ -171,6 +171,9 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "RaftEngine"
+
+            [wal.raft_engine_opts]
             dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -209,7 +212,22 @@ mod tests {
                     Some("mybucket"),
                 ),
                 (
+<<<<<<< HEAD
                     // wal.dir = /other/wal/dir
+=======
+                    // storage.manifest.gc_duration = 42s
+                    [
+                        env_prefix.to_string(),
+                        "storage".to_uppercase(),
+                        "manifest".to_uppercase(),
+                        "gc_duration".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("42s"),
+                ),
+                (
+                    // wal.raft_engine_opts.dir = /other/wal/dir
+>>>>>>> b52ebd53ef (feat(remote_wal): generalize wal options and log store building)
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
@@ -254,7 +272,8 @@ mod tests {
                 );
 
                 // Should be the values from config file, not environment variables.
-                assert_eq!(opts.wal.dir.unwrap(), "/tmp/greptimedb/wal");
+                let wal_dir = opts.wal.raft_engine_opts.unwrap().dir.unwrap();
+                assert_eq!(wal_dir, "/tmp/greptimedb/wal");
 
                 // Should be default values.
                 assert_eq!(opts.node_id, None);
