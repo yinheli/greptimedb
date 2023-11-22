@@ -1604,6 +1604,7 @@ version = "0.4.3"
 dependencies = [
  "common-base",
  "humantime-serde",
+ "rskafka",
  "serde",
 ]
 
@@ -4382,6 +4383,7 @@ dependencies = [
  "raft-engine",
  "rand",
  "rskafka",
+ "serde_json",
  "snafu",
  "store-api",
  "tokio",
