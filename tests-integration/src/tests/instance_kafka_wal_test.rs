@@ -12,28 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common_query::Output;
-use common_recordbatch::util;
 use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
-use frontend::error::Result;
 use frontend::instance::Instance;
+use rand::rngs::ThreadRng;
+use rand::Rng;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContext;
+use tokio::sync::Mutex;
 
 use crate::tests::test_util::*;
 
 #[apply(both_instances_cases_with_kafka_wal)]
-async fn test_create_database_and_insert_query(instance: Option<Box<dyn RebuildableMockInstance>>) {
-    let Some(instance) = instance else { return };
-
+async fn test_create_database_and_insert_query(
+    rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>,
+) {
+    let Some(instance) = rebuildable_instance else {
+        return;
+    };
     let instance = instance.frontend();
 
     let output = execute_sql(&instance, "create database test").await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert_matches!(output, Output::AffectedRows(1));
 
     let output = execute_sql(
         &instance,
@@ -43,25 +49,25 @@ async fn test_create_database_and_insert_query(instance: Option<Box<dyn Rebuilda
              memory DOUBLE,
              ts timestamp,
              TIME INDEX(ts)
-)"#,
+        )"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    assert_matches!(output, Output::AffectedRows(0));
 
     let output = execute_sql(
         &instance,
         r#"insert into test.demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),
-                           ('host2', 88.8,  333.3, 1655276558000)
-                           "#,
+                           ('host2', 88.8, 333.3, 1655276558000)
+        "#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(2)));
+    assert_matches!(output, Output::AffectedRows(2));
 
     let query_output = execute_sql(&instance, "select ts from test.demo order by ts limit 1").await;
     match query_output {
         Output::Stream(s) => {
-            let batches = util::collect(s).await.unwrap();
+            let batches = common_recordbatch::util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
                 Arc::new(TimestampMillisecondVector::from_vec(vec![
@@ -74,24 +80,192 @@ async fn test_create_database_and_insert_query(instance: Option<Box<dyn Rebuilda
     }
 }
 
+struct Table {
+    // Wrapped with Option to provide interior mutability.
+    // FIXME(niebayes): seems not necessary.
+    name: Option<String>,
+    logical_timer: AtomicU64,
+    inserted: Mutex<Vec<u64>>,
+}
+
+#[apply(both_instances_cases_with_kafka_wal)]
+async fn test_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>) {
+    let Some(mut rebuildable_instance) = rebuildable_instance else {
+        return;
+    };
+    let instance = rebuildable_instance.frontend();
+
+    let output = execute_sql(&instance, "create database test").await;
+    assert_matches!(output, Output::AffectedRows(1));
+
+    let tables = create_tables("test_replay", &instance, 3).await;
+    insert_data(&tables, &instance, 5).await;
+    ensure_data_exists(&tables, &instance).await;
+
+    // Rebuilds to emulate restart.
+    let instance = rebuildable_instance.rebuild().await;
+    ensure_data_exists(&tables, &instance).await;
+}
+
+#[apply(both_instances_cases_with_kafka_wal)]
+async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstance>>) {
+    let Some(mut rebuildable_instance) = rebuildable_instance else {
+        return;
+    };
+    let instance = rebuildable_instance.frontend();
+
+    let output = execute_sql(&instance, "create database test").await;
+    assert_matches!(output, Output::AffectedRows(1));
+
+    let mut tables = create_tables("test_replay", &instance, 3).await;
+    insert_data(&tables, &instance, 5).await;
+    ensure_data_exists(&tables, &instance).await;
+
+    // Renames tables to force flusing each table.
+    for table in tables.iter_mut() {
+        // Repeats the last char to construct a new table name.
+        let table_name = table.name.as_ref().unwrap();
+        let new_table_name = format!("{}{}", table_name, table_name.chars().last().unwrap());
+        assert_matches!(
+            do_alter(&instance, table_name, &new_table_name).await,
+            Output::AffectedRows(1)
+        );
+        table.name.replace(new_table_name);
+    }
+    ensure_data_exists(&tables, &instance).await;
+
+    // Rebuilds to emulate restart.
+    let instance = rebuildable_instance.rebuild().await;
+    ensure_data_exists(&tables, &instance).await;
+}
+
+async fn create_tables(
+    test_name: &str,
+    instance: &Arc<Instance>,
+    num_tables: usize,
+) -> Vec<Arc<Table>> {
+    let tables = (0..num_tables)
+        .map(|i| {
+            Arc::new(Table {
+                name: Some(format!("{}_{}", test_name, i)),
+                logical_timer: AtomicU64::new(1685508715000),
+                inserted: Mutex::new(Vec::new()),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Creates tables.
+    for table in tables.iter() {
+        assert_matches!(
+            do_create(&instance, table.name.as_ref().unwrap()).await,
+            Output::AffectedRows(1)
+        );
+    }
+    tables
+}
+
+async fn insert_data(tables: &[Arc<Table>], instance: &Arc<Instance>, num_writers: usize) {
+    // Each writer randomly chooses a table and inserts a sequence of rows into the table.
+    let writers = (0..num_writers)
+        .map(|_| async {
+            let mut rng = rand::thread_rng();
+            let table = &tables[rng.gen_range(0..tables.len())];
+            let ts = table.logical_timer.fetch_add(1000, Ordering::Relaxed);
+            for _ in 0..100 {
+                let row = make_row(ts, &mut rng);
+                assert_matches!(
+                    do_insert(&instance, table.name.as_ref().unwrap(), row).await,
+                    Output::AffectedRows(1)
+                );
+                {
+                    let mut inserted = table.inserted.lock().await;
+                    inserted.push(ts);
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    futures::future::join_all(writers).await;
+}
+
+async fn ensure_data_exists(tables: &[Arc<Table>], instance: &Arc<Instance>) {
+    let readers = tables
+        .iter()
+        .map(|table| async {
+            let output = do_query(&instance, table.name.as_ref().unwrap()).await;
+            let Output::Stream(stream) = output else {
+                unreachable!()
+            };
+            let record_batches = common_recordbatch::util::collect(stream).await.unwrap();
+            let queried = record_batches
+                .into_iter()
+                .flat_map(|rb| {
+                    rb.rows()
+                        .map(|row| row[0].as_timestamp().unwrap().value() as u64)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let inserted = table.inserted.lock().await;
+            assert_eq!(queried, *inserted);
+        })
+        .collect::<Vec<_>>();
+    futures::future::join_all(readers).await;
+}
+
+async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
+    execute_sql(
+        instance,
+        &format!(
+            r#"create table greptime.test.{} (
+                    host STRING,
+                    cpu DOUBLE,
+                    memory DOUBLE,
+                    ts timestamp,
+                    TIME INDEX(ts)
+                )"#,
+            table_name
+        ),
+    )
+    .await
+}
+
+async fn do_alter(instance: &Arc<Instance>, table_name: &str, new_table_name: &str) -> Output {
+    execute_sql(
+        instance,
+        &format!(
+            "alter table test.{} rename test.{}",
+            table_name, new_table_name
+        ),
+    )
+    .await
+}
+
+async fn do_insert(instance: &Arc<Instance>, table_name: &str, row: String) -> Output {
+    execute_sql(
+        &instance,
+        &format!("insert into test.{table_name}(host, cpu, memory, ts) values {row}"),
+    )
+    .await
+}
+
+async fn do_query(instance: &Arc<Instance>, table_name: &str) -> Output {
+    execute_sql(
+        &instance,
+        &format!("select ts from test.{table_name} order by ts"),
+    )
+    .await
+}
+
 async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
-    execute_sql_with(instance, sql, QueryContext::arc()).await
-}
-
-async fn try_execute_sql_with(
-    instance: &Arc<Instance>,
-    sql: &str,
-    query_ctx: QueryContextRef,
-) -> Result<Output> {
-    instance.do_query(sql, query_ctx).await.remove(0)
-}
-
-async fn execute_sql_with(
-    instance: &Arc<Instance>,
-    sql: &str,
-    query_ctx: QueryContextRef,
-) -> Output {
-    try_execute_sql_with(instance, sql, query_ctx)
+    instance
+        .do_query(sql, QueryContext::arc())
         .await
+        .remove(0)
         .unwrap()
+}
+
+fn make_row(ts: u64, rng: &mut ThreadRng) -> String {
+    let host = format!("host{}", rng.gen_range(0..5));
+    let cpu: f64 = rng.gen_range(0.0..99.9);
+    let memory: f64 = rng.gen_range(0.0..999.9);
+    format!("('{host}', {cpu}, {memory}, {ts})")
 }
