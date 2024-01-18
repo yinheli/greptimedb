@@ -81,9 +81,7 @@ async fn test_create_database_and_insert_query(
 }
 
 struct Table {
-    // Wrapped with Option to provide interior mutability.
-    // FIXME(niebayes): seems not necessary.
-    name: Option<String>,
+    name: String,
     logical_timer: AtomicU64,
     inserted: Mutex<Vec<u64>>,
 }
@@ -102,7 +100,7 @@ async fn test_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstanc
     insert_data(&tables, &instance, 5).await;
     ensure_data_exists(&tables, &instance).await;
 
-    // Rebuilds to emulate restart.
+    // Rebuilds to emulate restart to trigger a replay.
     let instance = rebuildable_instance.rebuild().await;
     ensure_data_exists(&tables, &instance).await;
 }
@@ -117,24 +115,31 @@ async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn Rebuildable
     let output = execute_sql(&instance, "create database test").await;
     assert_matches!(output, Output::AffectedRows(1));
 
-    let mut tables = create_tables("test_replay", &instance, 3).await;
+    let tables = create_tables("test_flush_then_replay", &instance, 3).await;
     insert_data(&tables, &instance, 5).await;
     ensure_data_exists(&tables, &instance).await;
 
     // Renames tables to force flusing each table.
-    for table in tables.iter_mut() {
-        // Repeats the last char to construct a new table name.
-        let table_name = table.name.as_ref().unwrap();
-        let new_table_name = format!("{}{}", table_name, table_name.chars().last().unwrap());
-        assert_matches!(
-            do_alter(&instance, table_name, &new_table_name).await,
-            Output::AffectedRows(1)
-        );
-        table.name.replace(new_table_name);
-    }
+    let tables = futures::future::join_all(tables.into_iter().map(|table| {
+        let instance = instance.clone();
+        async move {
+            // Repeats the last char to construct a new table name.
+            let new_table_name = format!("{}{}", table.name, table.name.chars().last().unwrap());
+            assert_matches!(
+                do_alter(&instance, &table.name, &new_table_name).await,
+                Output::AffectedRows(1)
+            );
+            Arc::new(Table {
+                name: new_table_name,
+                logical_timer: AtomicU64::new(table.logical_timer.load(Ordering::Relaxed)),
+                inserted: Mutex::new(table.inserted.lock().await.clone()),
+            })
+        }
+    }))
+    .await;
     ensure_data_exists(&tables, &instance).await;
 
-    // Rebuilds to emulate restart.
+    // Rebuilds to emulate restart to trigger a replay.
     let instance = rebuildable_instance.rebuild().await;
     ensure_data_exists(&tables, &instance).await;
 }
@@ -144,71 +149,64 @@ async fn create_tables(
     instance: &Arc<Instance>,
     num_tables: usize,
 ) -> Vec<Arc<Table>> {
-    let tables = (0..num_tables)
-        .map(|i| {
+    futures::future::join_all((0..num_tables).map(|i| {
+        let instance = instance.clone();
+        async move {
+            let table_name = format!("{}_{}", test_name, i);
+            assert_matches!(
+                do_create(&instance, &table_name).await,
+                Output::AffectedRows(1)
+            );
             Arc::new(Table {
-                name: Some(format!("{}_{}", test_name, i)),
+                name: table_name,
                 logical_timer: AtomicU64::new(1685508715000),
                 inserted: Mutex::new(Vec::new()),
             })
-        })
-        .collect::<Vec<_>>();
-
-    // Creates tables.
-    for table in tables.iter() {
-        assert_matches!(
-            do_create(&instance, table.name.as_ref().unwrap()).await,
-            Output::AffectedRows(1)
-        );
-    }
-    tables
+        }
+    }))
+    .await
 }
 
 async fn insert_data(tables: &[Arc<Table>], instance: &Arc<Instance>, num_writers: usize) {
     // Each writer randomly chooses a table and inserts a sequence of rows into the table.
-    let writers = (0..num_writers)
-        .map(|_| async {
-            let mut rng = rand::thread_rng();
-            let table = &tables[rng.gen_range(0..tables.len())];
-            let ts = table.logical_timer.fetch_add(1000, Ordering::Relaxed);
-            for _ in 0..100 {
-                let row = make_row(ts, &mut rng);
-                assert_matches!(
-                    do_insert(&instance, table.name.as_ref().unwrap(), row).await,
-                    Output::AffectedRows(1)
-                );
-                {
-                    let mut inserted = table.inserted.lock().await;
-                    inserted.push(ts);
-                }
+    futures::future::join_all((0..num_writers).map(|_| async {
+        let mut rng = rand::thread_rng();
+        let table = &tables[rng.gen_range(0..tables.len())];
+        let ts = table.logical_timer.fetch_add(1000, Ordering::Relaxed);
+        for _ in 0..100 {
+            let row = make_row(ts, &mut rng);
+            assert_matches!(
+                do_insert(instance, &table.name, row).await,
+                Output::AffectedRows(1)
+            );
+            {
+                let mut inserted = table.inserted.lock().await;
+                inserted.push(ts);
             }
-        })
-        .collect::<Vec<_>>();
-    futures::future::join_all(writers).await;
+        }
+    }))
+    .await;
 }
 
 async fn ensure_data_exists(tables: &[Arc<Table>], instance: &Arc<Instance>) {
-    let readers = tables
-        .iter()
-        .map(|table| async {
-            let output = do_query(&instance, table.name.as_ref().unwrap()).await;
-            let Output::Stream(stream) = output else {
-                unreachable!()
-            };
-            let record_batches = common_recordbatch::util::collect(stream).await.unwrap();
-            let queried = record_batches
-                .into_iter()
-                .flat_map(|rb| {
-                    rb.rows()
-                        .map(|row| row[0].as_timestamp().unwrap().value() as u64)
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            let inserted = table.inserted.lock().await;
-            assert_eq!(queried, *inserted);
-        })
-        .collect::<Vec<_>>();
-    futures::future::join_all(readers).await;
+    futures::future::join_all(tables.iter().map(|table| async {
+        let output = do_query(instance, &table.name).await;
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
+        let record_batches = common_recordbatch::util::collect(stream).await.unwrap();
+        let queried = record_batches
+            .into_iter()
+            .flat_map(|rb| {
+                rb.rows()
+                    .map(|row| row[0].as_timestamp().unwrap().value() as u64)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let inserted = table.inserted.lock().await;
+        assert_eq!(queried, *inserted);
+    }))
+    .await;
 }
 
 async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
@@ -221,7 +219,7 @@ async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
                     memory DOUBLE,
                     ts timestamp,
                     TIME INDEX(ts)
-                )"#,
+            )"#,
             table_name
         ),
     )
@@ -241,7 +239,7 @@ async fn do_alter(instance: &Arc<Instance>, table_name: &str, new_table_name: &s
 
 async fn do_insert(instance: &Arc<Instance>, table_name: &str, row: String) -> Output {
     execute_sql(
-        &instance,
+        instance,
         &format!("insert into test.{table_name}(host, cpu, memory, ts) values {row}"),
     )
     .await
@@ -249,7 +247,7 @@ async fn do_insert(instance: &Arc<Instance>, table_name: &str, row: String) -> O
 
 async fn do_query(instance: &Arc<Instance>, table_name: &str) -> Output {
     execute_sql(
-        &instance,
+        instance,
         &format!("select ts from test.{table_name} order by ts"),
     )
     .await
