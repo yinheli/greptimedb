@@ -38,7 +38,6 @@ use crate::error::{
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderRef;
-use crate::metrics;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
@@ -395,8 +394,6 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     version_control: &VersionControlRef,
     allow_stale_entries: bool,
 ) -> Result<EntryId> {
-    let replay_wal_timer = metrics::WAL_REPLAY_ELAPSED.start_timer();
-
     let mut rows_replayed = 0;
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
@@ -431,8 +428,6 @@ pub(crate) async fn replay_memtable<S: LogStore>(
             region_write_ctx.push_mutation(mutation.op_type, mutation.rows, OptionOutputTx::none());
         }
     }
-
-    replay_wal_timer.observe_duration();
 
     // set next_entry_id and write to memtable.
     region_write_ctx.set_next_entry_id(last_entry_id + 1);

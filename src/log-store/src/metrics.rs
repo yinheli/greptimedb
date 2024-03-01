@@ -36,6 +36,14 @@ lazy_static! {
     pub static ref METRIC_KAFKA_READ_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
         &["kafka", "read"],
     );
+    /// Counter of bytes of the append_batch operation on the raft-engine logstore.
+    pub static ref METRIC_RAFT_ENGINE_APPEND_BATCH_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
+        &["raft-engine", "append_batch"],
+    );
+    /// Counter of bytes of the read operation on the raft-engine logstore.
+    pub static ref METRIC_RAFT_ENGINE_READ_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
+        &["raft-engine", "read"],
+    );
 
     /// Counters of calls of each logstore operation on a logstore.
     pub static ref METRIC_LOGSTORE_OP_CALLS_TOTAL: IntCounterVec = register_int_counter_vec!(
@@ -52,6 +60,14 @@ lazy_static! {
     pub static ref METRIC_KAFKA_READ_CALLS_TOTAL: IntCounter = METRIC_LOGSTORE_OP_CALLS_TOTAL.with_label_values(
         &["kafka", "read"],
     );
+    /// Counter of calls of the append_batch operation on the raft-engine logstore.
+    pub static ref METRIC_RAFT_ENGINE_APPEND_BATCH_CALLS_TOTAL: IntCounter = METRIC_LOGSTORE_OP_CALLS_TOTAL.with_label_values(
+        &["raft-engine", "append_batch"],
+    );
+    /// Counter of calls of the read operation on the raft-engine logstore.
+    pub static ref METRIC_RAFT_ENGINE_READ_CALLS_TOTAL: IntCounter = METRIC_LOGSTORE_OP_CALLS_TOTAL.with_label_values(
+        &["raft-engine", "read"],
+    );
 
     /// Timer of operations on a logstore.
     pub static ref METRIC_LOGSTORE_OP_ELAPSED: HistogramVec = register_histogram_vec!(
@@ -65,4 +81,9 @@ lazy_static! {
     /// Timer of the append_batch operation on the kafka logstore.
     /// This timer only measures the duration of the read operation, not measures the total duration of replay.
     pub static ref METRIC_KAFKA_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["kafka", "read"]);
+    /// Timer of the append_batch operation on the raft-engine logstore.
+    pub static ref METRIC_RAFT_ENGINE_APPEND_BATCH_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "append_batch"]);
+    /// Timer of the append_batch operation on the raft-engine logstore.
+    /// This timer only measures the duration of the read operation, not measures the total duration of replay.
+    pub static ref METRIC_RAFT_ENGINE_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "read"]);
 }

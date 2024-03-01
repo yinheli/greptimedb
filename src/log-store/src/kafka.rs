@@ -86,8 +86,5 @@ impl Display for EntryImpl {
 
 /// Computes the estimated size in bytes of the entry.
 pub fn entry_estimated_size(entry: &EntryImpl) -> usize {
-    entry.data.capacity() * size_of::<u8>()
-        + size_of::<EntryId>()
-        + size_of::<NamespaceImpl>()
-        + entry.ns.topic.capacity()
+    size_of::<EntryImpl>() + entry.data.capacity() * size_of::<u8>() + entry.ns.topic.capacity()
 }

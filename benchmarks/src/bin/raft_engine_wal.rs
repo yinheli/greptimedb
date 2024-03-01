@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -49,6 +49,9 @@ struct DataSource {
     schema: Vec<ColumnSchema>,
     rng: Mutex<Option<SmallRng>>,
     rows_factor: usize,
+    // TODO(niebayes): remove our own metrics to improve performance despite a little.
+    total_produced_bytes: AtomicUsize,
+    total_restored_bytes: AtomicUsize,
 }
 
 impl DataSource {
@@ -60,6 +63,8 @@ impl DataSource {
             schema,
             rng: Mutex::new(Some(SmallRng::seed_from_u64(rng_seed))),
             rows_factor,
+            total_produced_bytes: AtomicUsize::new(0),
+            total_restored_bytes: AtomicUsize::new(0),
         }
     }
 
@@ -73,9 +78,13 @@ impl DataSource {
             rows: Some(self.build_rows(num_rows)),
         };
 
-        WalEntry {
+        let entry = WalEntry {
             mutations: vec![mutation],
-        }
+        };
+        self.total_produced_bytes
+            .fetch_add(Self::entry_estimated_size(&entry), Ordering::Relaxed);
+
+        entry
     }
 
     // FIXME(niebayes): figure out why the write entry size < read entry size.
@@ -351,6 +360,8 @@ impl Benchmarker {
                         }
                         info!("Writer {i} performs scrape {s}");
 
+                        let _timer = metrics::METRIC_KAFKA_WRITE_ELAPSED.start_timer();
+
                         let mut wal_writer = wal.writer();
                         for (id, source) in data_sources.iter() {
                             let entry = source.scrape();
@@ -408,14 +419,19 @@ impl Benchmarker {
                                 topic: source.topic.clone(),
                             });
 
+                            let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
+
                             // Consumes the wal stream to emulate replay.
                             let mut wal_stream =
                                 wal.scan(RegionId::from_u64(id), 0, &wal_options).unwrap();
                             while let Some(res) = wal_stream.next().await {
                                 let (_, entry) = res.unwrap();
 
-                                metrics::METRIC_KAFKA_READ_BYTES_TOTAL
-                                    .inc_by(DataSource::entry_estimated_size(&entry) as u64);
+                                let entry_size = DataSource::entry_estimated_size(&entry);
+                                metrics::METRIC_KAFKA_READ_BYTES_TOTAL.inc_by(entry_size as u64);
+                                source
+                                    .total_restored_bytes
+                                    .fetch_add(entry_size, Ordering::Relaxed);
                             }
                         }
 
@@ -433,11 +449,20 @@ impl Benchmarker {
             write_elapsed, read_elapsed, total_elapsed
         );
 
-        let total_written_bytes = metrics::METRIC_KAFKA_WRITE_BYTES_TOTAL.get();
+        let total_written_bytes = self
+            .data_sources
+            .values()
+            .map(|source| source.total_produced_bytes.load(Ordering::Relaxed))
+            .sum::<usize>();
         let write_throughput = total_written_bytes as f64 / write_elapsed as f64 * 1000.0;
+
+        let total_read_bytes = self
+            .data_sources
+            .values()
+            .map(|source| source.total_restored_bytes.load(Ordering::Relaxed))
+            .sum::<usize>();
         // This is the effective read throughput from which the read amplification is removed.
         // TODO(niebayes): add metrics inside kafka log store to measure the read amplification and the actual read throughput.
-        let total_read_bytes = metrics::METRIC_KAFKA_READ_BYTES_TOTAL.get();
         let read_throughput = if read_elapsed > 0 {
             total_read_bytes as f64 / read_elapsed as f64 * 1000.0
         } else {

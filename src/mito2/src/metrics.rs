@@ -254,13 +254,4 @@ lazy_static! {
     pub static ref INDEX_INTERMEDIATE_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
         .with_label_values(&["flush", "intermediate"]);
     // ------- End of index metrics.
-
-    // Wal metrics.
-    /// Timer of replay wal.
-    pub static ref WAL_REPLAY_ELAPSED: Histogram = register_histogram!(
-        "greptime_wal_replay_elapsed_total",
-        "wal replay elapsed",
-    ).unwrap();
-
-    // ------- End of wal metrics.
 }
