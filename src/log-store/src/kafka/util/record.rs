@@ -166,6 +166,8 @@ impl RecordProducer {
             })?
             .producer;
 
+        // TODO(niebayes): maybe requires some more fine-grained metrics to measure stages of writing to kafka.
+
         // Stores the offset of the last successfully produced record.
         let mut last_offset = None;
         let max_record_size =

@@ -17,6 +17,7 @@ pub mod log_store;
 pub(crate) mod util;
 
 use std::fmt::Display;
+use std::mem::size_of;
 
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::{Entry, Id as EntryId};
@@ -81,4 +82,12 @@ impl Display for EntryImpl {
             self.data.len()
         )
     }
+}
+
+/// Computes the estimated size in bytes of the entry.
+pub fn entry_estimated_size(entry: &EntryImpl) -> usize {
+    entry.data.capacity() * size_of::<u8>()
+        + size_of::<EntryId>()
+        + size_of::<NamespaceImpl>()
+        + entry.ns.topic.capacity()
 }

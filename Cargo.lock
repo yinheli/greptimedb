@@ -862,14 +862,25 @@ dependencies = [
 name = "benchmarks"
 version = "0.6.0"
 dependencies = [
+ "api",
  "arrow",
  "chrono",
  "clap 4.4.11",
  "client",
+ "common-base",
+ "common-telemetry",
+ "common-wal",
+ "futures",
  "futures-util",
  "indicatif",
  "itertools 0.10.5",
+ "log-store",
+ "mito2",
+ "num_cpus",
  "parquet",
+ "rand",
+ "rskafka",
+ "store-api",
  "tokio",
 ]
 
@@ -2354,11 +2365,10 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-channel"
-version = "0.5.10"
+version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a9b73a36529d9c47029b9fb3a6f0ea3cc916a261195352ba19e770fc1748b2"
+checksum = "ab3db02a9c5b5121e1e42fbdb1aeb65f5e02624cc58c43f2884c6ccac0b82f95"
 dependencies = [
- "cfg-if 1.0.0",
  "crossbeam-utils",
 ]
 
@@ -4864,6 +4874,8 @@ dependencies = [
  "futures",
  "futures-util",
  "itertools 0.10.5",
+ "lazy_static",
+ "prometheus",
  "protobuf",
  "protobuf-build",
  "raft-engine",

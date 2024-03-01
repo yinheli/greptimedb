@@ -113,10 +113,12 @@ sync_period = "1000ms"
 
 # Kafka wal options.
 # The broker endpoints of the Kafka cluster. ["127.0.0.1:9092"] by default.
-# broker_endpoints = ["127.0.0.1:9092"]
+broker_endpoints = ["127.0.0.1:9092"]
+num_topics = 16
+replication_factor = 1
+max_batch_size = "1MB"
+linger = "20ms"
 
-# Number of topics to be created upon start.
-# num_topics = 64
 # Topic selector type.
 # Available selector types: 
 # - "round_robin" (default)
@@ -125,13 +127,10 @@ sync_period = "1000ms"
 # topic_name_prefix = "greptimedb_wal_topic"
 # The number of replicas of each partition.
 # Warning: the replication factor must be positive and must not be greater than the number of broker endpoints.
-# replication_factor = 1
 
 # The max size of a single producer batch.
 # Warning: Kafka has a default limit of 1MB per message in a topic.
-# max_batch_size = "1MB"
 # The linger duration.
-# linger = "200ms"
 # The consumer wait timeout.
 # consumer_wait_timeout = "100ms"
 # Create topic timeout.
