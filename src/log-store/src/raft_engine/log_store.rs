@@ -296,12 +296,12 @@ impl LogStore for RaftEngineLogStore {
         let last_index = engine.last_index(ns.id()).unwrap_or(0);
         let mut start_index = entry_id.max(engine.first_index(ns.id()).unwrap_or(last_index + 1));
 
-        info!(
-            "Read logstore, namespace: {}, start: {}, span: {:?}",
-            ns.id(),
-            entry_id,
-            self.span(ns)
-        );
+        // info!(
+        //     "Read logstore, namespace: {}, start: {}, span: {:?}",
+        //     ns.id(),
+        //     entry_id,
+        //     self.span(ns)
+        // );
         let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();

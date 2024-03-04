@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod metrics;
-pub mod wal;
+pub mod region;
+pub mod region_worker;

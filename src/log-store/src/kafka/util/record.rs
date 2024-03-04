@@ -97,6 +97,8 @@ impl TryFrom<Record> for KafkaRecord {
     }
 }
 
+// TODO(niebayes): Decode KafkaRecord to Record requires a lot of cpus.
+// we may use prost endec to coincidence with the add_entry.
 impl TryFrom<KafkaRecord> for Record {
     type Error = crate::error::Error;
 

@@ -15,10 +15,10 @@
 //! Write ahead log of the engine.
 
 use std::collections::HashMap;
-use std::mem;
+use std::mem::{self, size_of};
 use std::sync::Arc;
 
-use api::v1::WalEntry;
+use api::v1::{ColumnSchema, Mutation, Row, Rows, Value, WalEntry};
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_wal::options::WalOptions;
@@ -175,6 +175,29 @@ impl<S: LogStore> WalWriter<S> {
             .map_err(BoxedError::new)
             .context(WriteWalSnafu)
     }
+}
+
+pub fn entry_estimated_size(entry: &WalEntry) -> usize {
+    let wrapper_size = size_of::<WalEntry>()
+        + entry.mutations.capacity() * size_of::<Mutation>()
+        + size_of::<Rows>();
+
+    let rows = entry.mutations[0].rows.as_ref().unwrap();
+
+    let schema_size = rows.schema.capacity() * size_of::<ColumnSchema>()
+        + rows
+            .schema
+            .iter()
+            .map(|s| s.column_name.capacity())
+            .sum::<usize>();
+    let values_size = (rows.rows.capacity() * size_of::<Row>())
+        + rows
+            .rows
+            .iter()
+            .map(|r| r.values.capacity() * size_of::<Value>())
+            .sum::<usize>();
+
+    wrapper_size + schema_size + values_size
 }
 
 #[cfg(test)]

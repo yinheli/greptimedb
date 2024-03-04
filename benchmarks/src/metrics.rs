@@ -22,29 +22,20 @@ pub const OPTYPE_LABEL: &str = "optype";
 
 lazy_static! {
     /// Counters of bytes of each logstore operation on a logstore.
-    pub static ref METRIC_LOGSTORE_OP_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
-        "greptime_bench_logstore_op_bytes_total",
-        "logstore operation bytes total",
-        &[LOGSTORE_LABEL, OPTYPE_LABEL],
+    pub static ref METRIC_WAL_OP_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_bench_wal_op_bytes_total",
+        "wal operation bytes total",
+        &[OPTYPE_LABEL],
     )
     .unwrap();
-    /// Counter of bytes of the append_batch operation on the kafka logstore.
-    pub static ref METRIC_KAFKA_WRITE_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
-        &["kafka", "write"],
+    /// Counter of bytes of the append_batch operation.
+    pub static ref METRIC_WAL_WRITE_BYTES_TOTAL: IntCounter = METRIC_WAL_OP_BYTES_TOTAL.with_label_values(
+        &["write"],
     );
-    /// Counter of bytes of the read operation on the kafka logstore.
-    pub static ref METRIC_KAFKA_READ_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
-        &["kafka", "read"],
+    /// Counter of bytes of the read operation.
+    pub static ref METRIC_WAL_READ_BYTES_TOTAL: IntCounter = METRIC_WAL_OP_BYTES_TOTAL.with_label_values(
+        &["read"],
     );
-    /// Counter of bytes of the write operation on the raft-engine logstore.
-    pub static ref METRIC_RAFT_ENGINE_WRITE_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
-        &["raft-engine", "write"],
-    );
-    /// Counter of bytes of the read operation on the raft-engine logstore.
-    pub static ref METRIC_RAFT_ENGINE_READ_BYTES_TOTAL: IntCounter = METRIC_LOGSTORE_OP_BYTES_TOTAL.with_label_values(
-        &["raft-engine", "read"],
-    );
-
 
     // TODO(niebayes): figure out the unit of timers. It states it's 1 second but it seems actually it's 0.1 second.
     /// Timer of operations on a logstore.
