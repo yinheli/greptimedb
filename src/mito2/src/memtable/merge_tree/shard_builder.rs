@@ -14,6 +14,7 @@
 
 //! Builder of a shard.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use store_api::metadata::RegionMetadataRef;
@@ -21,12 +22,13 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::data::{
-    DataBatch, DataBuffer, DataBufferReader, DataParts, DATA_INIT_CAP,
+    DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
 use crate::memtable::merge_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::merge_tree::metrics::WriteMetrics;
 use crate::memtable::merge_tree::shard::Shard;
 use crate::memtable::merge_tree::{MergeTreeConfig, PkId, ShardId};
+use crate::metrics::MERGE_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -58,11 +60,26 @@ impl ShardBuilder {
         }
     }
 
+    /// Write a key value with given pk_index (caller must ensure the pk_index exist in dict_builder)
+    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: &KeyValue) {
+        assert_eq!(self.current_shard_id, pk_id.shard_id);
+        self.data_buffer.write_row(pk_id.pk_index, key_value);
+    }
+
     /// Write a key value with its encoded primary key.
-    pub fn write_with_key(&mut self, key: &[u8], key_value: KeyValue, metrics: &mut WriteMetrics) {
+    pub fn write_with_key(
+        &mut self,
+        primary_key: &[u8],
+        key_value: &KeyValue,
+        metrics: &mut WriteMetrics,
+    ) -> PkId {
         // Safety: we check whether the builder need to freeze before.
-        let pk_index = self.dict_builder.insert_key(key, metrics);
+        let pk_index = self.dict_builder.insert_key(primary_key, metrics);
         self.data_buffer.write_row(pk_index, key_value);
+        PkId {
+            shard_id: self.current_shard_id,
+            pk_index,
+        }
     }
 
     /// Returns true if the builder need to freeze.
@@ -78,14 +95,31 @@ impl ShardBuilder {
     /// Builds a new shard and resets the builder.
     ///
     /// Returns `None` if the builder is empty.
-    pub fn finish(&mut self, metadata: RegionMetadataRef) -> Result<Option<Shard>> {
+    pub fn finish(
+        &mut self,
+        metadata: RegionMetadataRef,
+        pk_to_pk_id: &mut HashMap<Vec<u8>, PkId>,
+    ) -> Result<Option<Shard>> {
         if self.is_empty() {
             return Ok(None);
         }
 
-        let key_dict = self.dict_builder.finish();
+        let mut pk_to_index = BTreeMap::new();
+        let key_dict = self.dict_builder.finish(&mut pk_to_index);
         let data_part = match &key_dict {
             Some(dict) => {
+                // Adds mapping to the map.
+                pk_to_pk_id.reserve(pk_to_index.len());
+                for (k, pk_index) in pk_to_index {
+                    pk_to_pk_id.insert(
+                        k,
+                        PkId {
+                            shard_id: self.current_shard_id,
+                            pk_index,
+                        },
+                    );
+                }
+
                 let pk_weights = dict.pk_weights_to_sort_data();
                 self.data_buffer.freeze(Some(&pk_weights), true)?
             }
@@ -106,12 +140,23 @@ impl ShardBuilder {
     }
 
     /// Scans the shard builder.
-    pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReader> {
-        let dict_reader = self.dict_builder.read();
-        dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
-        let data_reader = self.data_buffer.read(Some(pk_weights_buffer))?;
+    pub fn read(&self, pk_weights_buffer: &mut Vec<u16>) -> Result<ShardBuilderReaderBuilder> {
+        let dict_reader = {
+            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+                .with_label_values(&["shard_builder_read_pk"])
+                .start_timer();
+            self.dict_builder.read()
+        };
 
-        Ok(ShardBuilderReader {
+        {
+            let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+                .with_label_values(&["sort_pk"])
+                .start_timer();
+            dict_reader.pk_weights_to_sort_data(pk_weights_buffer);
+        }
+
+        let data_reader = self.data_buffer.read()?;
+        Ok(ShardBuilderReaderBuilder {
             shard_id: self.current_shard_id,
             dict_reader,
             data_reader,
@@ -121,6 +166,23 @@ impl ShardBuilder {
     /// Returns true if the builder is empty.
     pub fn is_empty(&self) -> bool {
         self.data_buffer.is_empty()
+    }
+}
+
+pub(crate) struct ShardBuilderReaderBuilder {
+    shard_id: ShardId,
+    dict_reader: DictBuilderReader,
+    data_reader: DataBufferReaderBuilder,
+}
+
+impl ShardBuilderReaderBuilder {
+    pub(crate) fn build(self, pk_weights: Option<&[u16]>) -> Result<ShardBuilderReader> {
+        let data_reader = self.data_reader.build(pk_weights)?;
+        Ok(ShardBuilderReader {
+            shard_id: self.shard_id,
+            dict_reader: self.dict_reader,
+            data_reader,
+        })
     }
 }
 
@@ -162,6 +224,7 @@ impl ShardBuilderReader {
 mod tests {
 
     use super::*;
+    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::merge_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
@@ -173,24 +236,24 @@ mod tests {
             build_key_values_with_ts_seq_values(
                 metadata,
                 "shard_builder".to_string(),
-                3,
-                [30, 31].into_iter(),
+                2,
+                [20, 21].into_iter(),
                 [Some(0.0), Some(1.0)].into_iter(),
                 0,
             ),
             build_key_values_with_ts_seq_values(
                 metadata,
                 "shard_builder".to_string(),
-                1,
-                [10, 11].into_iter(),
+                0,
+                [0, 1].into_iter(),
                 [Some(0.0), Some(1.0)].into_iter(),
                 1,
             ),
             build_key_values_with_ts_seq_values(
                 metadata,
                 "shard_builder".to_string(),
-                2,
-                [20, 21].into_iter(),
+                1,
+                [10, 11].into_iter(),
                 [Some(0.0), Some(1.0)].into_iter(),
                 2,
             ),
@@ -204,17 +267,57 @@ mod tests {
         let config = MergeTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
-        assert!(shard_builder.finish(metadata.clone()).unwrap().is_none());
+        assert!(shard_builder
+            .finish(metadata.clone(), &mut HashMap::new())
+            .unwrap()
+            .is_none());
         assert_eq!(1, shard_builder.current_shard_id);
 
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, kv, &mut metrics);
+                shard_builder.write_with_key(&key, &kv, &mut metrics);
             }
         }
-        let shard = shard_builder.finish(metadata).unwrap().unwrap();
+        let shard = shard_builder
+            .finish(metadata, &mut HashMap::new())
+            .unwrap()
+            .unwrap();
         assert_eq!(1, shard.shard_id);
         assert_eq!(2, shard_builder.current_shard_id);
+    }
+
+    #[test]
+    fn test_write_read_shard_builder() {
+        let metadata = metadata_for_test();
+        let input = input_with_key(&metadata);
+        let config = MergeTreeConfig::default();
+        let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
+        let mut metrics = WriteMetrics::default();
+
+        for key_values in &input {
+            for kv in key_values.iter() {
+                let key = encode_key_by_kv(&kv);
+                shard_builder.write_with_key(&key, &kv, &mut metrics);
+            }
+        }
+
+        let mut pk_weights = Vec::new();
+        let mut reader = shard_builder
+            .read(&mut pk_weights)
+            .unwrap()
+            .build(Some(&pk_weights))
+            .unwrap();
+        let mut timestamps = Vec::new();
+        while reader.is_valid() {
+            let rb = reader.current_data_batch().slice_record_batch();
+            let ts_array = rb.column(1);
+            let ts_slice = timestamp_array_to_i64_slice(ts_array);
+            timestamps.extend_from_slice(ts_slice);
+
+            reader.next().unwrap();
+        }
+        assert_eq!(vec![0, 1, 10, 11, 20, 21], timestamps);
+        assert_eq!(vec![2, 0, 1], pk_weights);
     }
 }

@@ -44,6 +44,8 @@ mode = "disable"
 cert_path = ""
 # Private key file path.
 key_path = ""
+# Watch for Certificate and key file change and auto reload
+watch = false
 
 # PostgresSQL server options.
 [postgres]
@@ -62,6 +64,8 @@ mode = "disable"
 cert_path = ""
 # private key file path.
 key_path = ""
+# Watch for Certificate and key file change and auto reload
+watch = false
 
 # OpenTSDB protocol options.
 [opentsdb]
@@ -120,7 +124,7 @@ max_batch_size = "1MB"
 linger = "20ms"
 
 # Topic selector type.
-# Available selector types: 
+# Available selector types:
 # - "round_robin" (default)
 # selector_type = "round_robin"
 # The prefix of topic name.

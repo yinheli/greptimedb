@@ -18,6 +18,7 @@ use std::cmp::{Ordering, Reverse};
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use datatypes::arrow;
@@ -46,6 +47,7 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::memtable::merge_tree::PkIndex;
+use crate::metrics::{MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, MERGE_TREE_READ_STAGE_ELAPSED};
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 
@@ -214,7 +216,7 @@ impl DataBuffer {
     }
 
     /// Writes a row to data buffer.
-    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
         self.ts_builder.push_value_ref(kv.timestamp());
         self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
@@ -251,21 +253,39 @@ impl DataBuffer {
         Ok(parts)
     }
 
-    /// Reads batches from data buffer without resetting builder's buffers.
-    /// If pk_weights is present, yielded rows are sorted according to weights,
-    /// otherwise rows are sorted by "pk_weights" values as they are actually weights.
-    pub fn read(&self, pk_weights: Option<&[u16]>) -> Result<DataBufferReader> {
-        let batch = read_data_buffer_to_record_batches(
-            self.data_part_schema.clone(),
-            self,
-            pk_weights,
-            self.dedup,
-            // replace_pk_index is always set to false since:
-            // - for DataBuffer in ShardBuilder, pk dict is not frozen
-            // - for DataBuffer in Shard, values in pk_index column has already been replaced during `freeze`.
-            false,
-        )?;
-        DataBufferReader::new(batch)
+    /// Builds a lazily initialized data buffer reader from [DataBuffer]
+    pub fn read(&self) -> Result<DataBufferReaderBuilder> {
+        let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_buffer"])
+            .start_timer();
+
+        let (pk_index, timestamp, sequence, op_type) = (
+            self.pk_index_builder.finish_cloned(),
+            self.ts_builder.to_vector_cloned(),
+            self.sequence_builder.finish_cloned(),
+            self.op_type_builder.finish_cloned(),
+        );
+
+        let mut fields = Vec::with_capacity(self.field_builders.len());
+        for b in self.field_builders.iter() {
+            let field = match b {
+                LazyMutableVectorBuilder::Type(ty) => LazyFieldVector::Type(ty.clone()),
+                LazyMutableVectorBuilder::Builder(builder) => {
+                    LazyFieldVector::Vector(builder.to_vector_cloned())
+                }
+            };
+            fields.push(field);
+        }
+
+        Ok(DataBufferReaderBuilder {
+            schema: self.data_part_schema.clone(),
+            pk_index,
+            timestamp,
+            sequence,
+            op_type,
+            fields,
+            dedup: self.dedup,
+        })
     }
 
     /// Returns num of rows in data buffer.
@@ -339,56 +359,6 @@ fn drain_data_buffer_to_record_batches(
                 single_null.to_vector().to_arrow_array()
             }
             LazyMutableVectorBuilder::Builder(builder) => builder.to_vector().to_arrow_array(),
-        };
-        columns.push(
-            arrow::compute::take(&array, &indices_to_take, None)
-                .context(error::ComputeArrowSnafu)?,
-        );
-    }
-
-    RecordBatch::try_new(schema, columns).context(error::NewRecordBatchSnafu)
-}
-
-/// Reads `DataBuffer` to record batches, with rows sorted according to pk_weights without resetting `DataBuffer`.
-/// `dedup`: whether to true to remove the duplicated rows inside `DataBuffer`.
-/// `replace_pk_index`: whether to replace the pk_index values with corresponding pk weight.
-fn read_data_buffer_to_record_batches(
-    schema: SchemaRef,
-    buffer: &DataBuffer,
-    pk_weights: Option<&[u16]>,
-    dedup: bool,
-    replace_pk_index: bool,
-) -> Result<RecordBatch> {
-    let num_rows = buffer.ts_builder.len();
-
-    let (pk_index_v, ts_v, sequence_v, op_type_v) = (
-        buffer.pk_index_builder.finish_cloned(),
-        buffer.ts_builder.to_vector_cloned(),
-        buffer.sequence_builder.finish_cloned(),
-        buffer.op_type_builder.finish_cloned(),
-    );
-
-    let (indices_to_take, mut columns) = build_row_sort_indices_and_columns(
-        pk_weights,
-        pk_index_v,
-        ts_v,
-        sequence_v,
-        op_type_v,
-        replace_pk_index,
-        dedup,
-        buffer.field_builders.len() + 4,
-    )?;
-
-    for b in buffer.field_builders.iter() {
-        let array = match b {
-            LazyMutableVectorBuilder::Type(ty) => {
-                let mut single_null = ty.create_mutable_vector(num_rows);
-                single_null.push_nulls(num_rows);
-                single_null.to_vector().to_arrow_array()
-            }
-            LazyMutableVectorBuilder::Builder(builder) => {
-                builder.to_vector_cloned().to_arrow_array()
-            }
         };
         columns.push(
             arrow::compute::take(&array, &indices_to_take, None)
@@ -488,11 +458,75 @@ pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     }
 }
 
+enum LazyFieldVector {
+    Type(ConcreteDataType),
+    Vector(VectorRef),
+}
+
+pub(crate) struct DataBufferReaderBuilder {
+    schema: SchemaRef,
+    pk_index: UInt16Vector,
+    timestamp: VectorRef,
+    sequence: UInt64Vector,
+    op_type: UInt8Vector,
+    fields: Vec<LazyFieldVector>,
+    dedup: bool,
+}
+
+impl DataBufferReaderBuilder {
+    fn build_record_batch(self, pk_weights: Option<&[u16]>) -> Result<RecordBatch> {
+        let num_rows = self.timestamp.len();
+        let (indices_to_take, mut columns) = build_row_sort_indices_and_columns(
+            pk_weights,
+            self.pk_index,
+            self.timestamp,
+            self.sequence,
+            self.op_type,
+            // replace_pk_index is always set to false since:
+            // - for DataBuffer in ShardBuilder, pk dict is not frozen
+            // - for DataBuffer in Shard, values in pk_index column has already been replaced during `freeze`.
+            false,
+            self.dedup,
+            self.fields.len() + 4,
+        )?;
+
+        for b in self.fields.iter() {
+            let array = match b {
+                LazyFieldVector::Type(ty) => {
+                    let mut single_null = ty.create_mutable_vector(num_rows);
+                    single_null.push_nulls(num_rows);
+                    single_null.to_vector().to_arrow_array()
+                }
+                LazyFieldVector::Vector(vector) => vector.to_arrow_array(),
+            };
+            columns.push(
+                arrow::compute::take(&array, &indices_to_take, None)
+                    .context(error::ComputeArrowSnafu)?,
+            );
+        }
+        RecordBatch::try_new(self.schema, columns).context(error::NewRecordBatchSnafu)
+    }
+
+    pub fn build(self, pk_weights: Option<&[u16]>) -> Result<DataBufferReader> {
+        self.build_record_batch(pk_weights)
+            .and_then(DataBufferReader::new)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct DataBufferReader {
     batch: RecordBatch,
     offset: usize,
     current_range: Option<DataBatchRange>,
+    elapsed_time: Duration,
+}
+
+impl Drop for DataBufferReader {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_buffer"])
+            .observe(self.elapsed_time.as_secs_f64())
+    }
 }
 
 impl DataBufferReader {
@@ -501,6 +535,7 @@ impl DataBufferReader {
             batch,
             offset: 0,
             current_range: None,
+            elapsed_time: Duration::default(),
         };
         reader.next()?; // fill data batch for comparison and merge.
         Ok(reader)
@@ -527,6 +562,7 @@ impl DataBufferReader {
             self.current_range = None;
             return Ok(());
         }
+        let start = Instant::now();
         let pk_index_array = pk_index_array(&self.batch);
         if let Some((next_pk, range)) = search_next_pk_range(pk_index_array, self.offset) {
             self.offset = range.end;
@@ -538,6 +574,7 @@ impl DataBufferReader {
         } else {
             self.current_range = None;
         }
+        self.elapsed_time += start.elapsed();
         Ok(())
     }
 }
@@ -741,18 +778,30 @@ impl<'a> DataPartEncoder<'a> {
 
     pub fn write(self, source: &mut DataBuffer) -> Result<DataPart> {
         let mut bytes = Vec::with_capacity(1024);
-        let rb = drain_data_buffer_to_record_batches(
-            self.schema.clone(),
-            source,
-            self.pk_weights,
-            self.dedup,
-            self.replace_pk_index,
-        )?;
-        let mut writer =
-            ArrowWriter::try_new(&mut bytes, self.schema.clone(), Some(self.writer_props()))
-                .context(error::EncodeMemtableSnafu)?;
-        writer.write(&rb).context(error::EncodeMemtableSnafu)?;
-        let _metadata = writer.close().context(error::EncodeMemtableSnafu)?;
+
+        let rb = {
+            let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
+                .with_label_values(&["drain_data_buffer_to_batch"])
+                .start_timer();
+            drain_data_buffer_to_record_batches(
+                self.schema.clone(),
+                source,
+                self.pk_weights,
+                self.dedup,
+                self.replace_pk_index,
+            )?
+        };
+
+        {
+            let _timer = MERGE_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED
+                .with_label_values(&["encode"])
+                .start_timer();
+            let mut writer =
+                ArrowWriter::try_new(&mut bytes, self.schema.clone(), Some(self.writer_props()))
+                    .context(error::EncodeMemtableSnafu)?;
+            writer.write(&rb).context(error::EncodeMemtableSnafu)?;
+            let _metadata = writer.close().context(error::EncodeMemtableSnafu)?;
+        }
         Ok(DataPart::Parquet(ParquetPart {
             data: Bytes::from(bytes),
         }))
@@ -783,6 +832,15 @@ pub struct DataPartReader {
     inner: ParquetRecordBatchReader,
     current_batch: Option<RecordBatch>,
     current_range: Option<DataBatchRange>,
+    elapsed: Duration,
+}
+
+impl Drop for DataPartReader {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_part"])
+            .observe(self.elapsed.as_secs_f64());
+    }
 }
 
 impl Debug for DataPartReader {
@@ -805,6 +863,7 @@ impl DataPartReader {
             inner: parquet_reader,
             current_batch: None,
             current_range: None,
+            elapsed: Default::default(),
         };
         reader.next()?;
         Ok(reader)
@@ -827,6 +886,7 @@ impl DataPartReader {
     }
 
     pub(crate) fn next(&mut self) -> Result<()> {
+        let start = Instant::now();
         if let Some((next_pk, range)) = self.search_next_pk_range() {
             // first try to search next pk in current record batch.
             self.current_range = Some(DataBatchRange {
@@ -847,7 +907,7 @@ impl DataPartReader {
                 self.current_range = None;
             }
         }
-
+        self.elapsed += start.elapsed();
         Ok(())
     }
 
@@ -893,25 +953,24 @@ impl DataParts {
     }
 
     /// Writes a row into parts.
-    pub fn write_row(&mut self, pk_index: PkIndex, kv: KeyValue) {
+    pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
         self.active.write_row(pk_index, kv)
     }
 
     /// Reads data from all parts including active and frozen parts.
     /// The returned iterator yields a record batch of one primary key at a time.
     /// The order of yielding primary keys is determined by provided weights.
-    pub fn read(&self) -> Result<DataPartsReader> {
-        let mut nodes = Vec::with_capacity(self.frozen.len() + 1);
-        nodes.push(DataNode::new(DataSource::Buffer(
-            // `DataPars::read` ensures that all pk_index inside `DataBuffer` are replaced by weights.
-            // then we pass None to sort rows directly according to pk_index.
-            self.active.read(None)?,
-        )));
+    pub fn read(&self) -> Result<DataPartsReaderBuilder> {
+        let _timer = MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["build_data_parts_reader"])
+            .start_timer();
+
+        let buffer = self.active.read()?;
+        let mut parts = Vec::with_capacity(self.frozen.len());
         for p in &self.frozen {
-            nodes.push(DataNode::new(DataSource::Part(p.read()?)));
+            parts.push(p.read()?);
         }
-        let merger = Merger::try_new(nodes)?;
-        Ok(DataPartsReader { merger })
+        Ok(DataPartsReaderBuilder { buffer, parts })
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -919,9 +978,42 @@ impl DataParts {
     }
 }
 
+pub struct DataPartsReaderBuilder {
+    buffer: DataBufferReaderBuilder,
+    parts: Vec<DataPartReader>,
+}
+
+impl DataPartsReaderBuilder {
+    pub(crate) fn build(self) -> Result<DataPartsReader> {
+        let mut nodes = Vec::with_capacity(self.parts.len() + 1);
+        nodes.push(DataNode::new(DataSource::Buffer(
+            // `DataPars::read` ensures that all pk_index inside `DataBuffer` are replaced by weights.
+            // then we pass None to sort rows directly according to pk_index.
+            self.buffer.build(None)?,
+        )));
+        for p in self.parts {
+            nodes.push(DataNode::new(DataSource::Part(p)));
+        }
+        let merger = Merger::try_new(nodes)?;
+        Ok(DataPartsReader {
+            merger,
+            elapsed: Default::default(),
+        })
+    }
+}
+
 /// Reader for all parts inside a `DataParts`.
 pub struct DataPartsReader {
     merger: Merger<DataNode>,
+    elapsed: Duration,
+}
+
+impl Drop for DataPartsReader {
+    fn drop(&mut self) {
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["read_data_parts"])
+            .observe(self.elapsed.as_secs_f64())
+    }
 }
 
 impl DataPartsReader {
@@ -931,7 +1023,10 @@ impl DataPartsReader {
     }
 
     pub(crate) fn next(&mut self) -> Result<()> {
-        self.merger.next()
+        let start = Instant::now();
+        let result = self.merger.next();
+        self.elapsed += start.elapsed();
+        result
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -942,7 +1037,7 @@ impl DataPartsReader {
 #[cfg(test)]
 mod tests {
     use datafusion::arrow::array::Float64Array;
-    use datatypes::arrow::array::{TimestampMillisecondArray, UInt16Array, UInt64Array};
+    use datatypes::arrow::array::UInt16Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::data_type::AsBytes;
 
@@ -971,73 +1066,6 @@ mod tests {
         }
     }
 
-    fn check_test_data_buffer_to_record_batches(keep_data: bool) {
-        let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, true);
-
-        write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
-        write_rows_to_buffer(&mut buffer, &meta, 1, vec![1, 2], vec![Some(1.1), None], 2);
-        write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
-        assert_eq!(5, buffer.num_rows());
-        let schema = memtable_schema_to_encoded_schema(&meta);
-        let batch = if keep_data {
-            read_data_buffer_to_record_batches(schema, &buffer, Some(&[3, 1]), true, true).unwrap()
-        } else {
-            drain_data_buffer_to_record_batches(schema, &mut buffer, Some(&[3, 1]), true, true)
-                .unwrap()
-        };
-
-        assert_eq!(
-            vec![1, 2, 1, 2],
-            batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(
-            vec![1, 1, 3, 3],
-            batch
-                .column_by_name(PK_INDEX_COLUMN_NAME)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(
-            vec![Some(1.1), None, Some(0.1), Some(1.1)],
-            batch
-                .column_by_name("v1")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>()
-        );
-
-        if keep_data {
-            assert_eq!(5, buffer.num_rows());
-        } else {
-            assert_eq!(0, buffer.num_rows());
-        }
-    }
-
-    #[test]
-    fn test_data_buffer_to_record_batches() {
-        check_test_data_buffer_to_record_batches(true);
-        check_test_data_buffer_to_record_batches(false);
-    }
-
     fn check_data_buffer_dedup(dedup: bool) {
         let metadata = metadata_for_test();
         let mut buffer = DataBuffer::with_capacity(metadata.clone(), 10, dedup);
@@ -1058,7 +1086,7 @@ mod tests {
             2,
         );
 
-        let mut reader = buffer.read(Some(&[0])).unwrap();
+        let mut reader = buffer.read().unwrap().build(Some(&[0])).unwrap();
         let mut res = vec![];
         while reader.is_valid() {
             let batch = reader.current_data_batch();
@@ -1076,100 +1104,6 @@ mod tests {
     fn test_data_buffer_dedup() {
         check_data_buffer_dedup(true);
         check_data_buffer_dedup(false);
-    }
-
-    #[test]
-    fn test_data_buffer_to_record_batches_with_dedup() {
-        let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, true);
-
-        write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
-        write_rows_to_buffer(&mut buffer, &meta, 1, vec![2], vec![Some(1.1)], 2);
-        write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
-        assert_eq!(4, buffer.num_rows());
-        let schema = memtable_schema_to_encoded_schema(&meta);
-        let batch =
-            read_data_buffer_to_record_batches(schema, &buffer, Some(&[0, 1]), true, true).unwrap();
-
-        assert_eq!(3, batch.num_rows());
-        assert_eq!(
-            vec![0, 0, 1],
-            batch
-                .column_by_name(PK_INDEX_COLUMN_NAME)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(
-            vec![1, 2, 2],
-            batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(
-            vec![1, 3, 2],
-            batch
-                .column_by_name(SEQUENCE_COLUMN_NAME)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_data_buffer_to_record_batches_without_dedup() {
-        let meta = metadata_for_test();
-        let mut buffer = DataBuffer::with_capacity(meta.clone(), 10, true);
-
-        write_rows_to_buffer(&mut buffer, &meta, 0, vec![1, 2], vec![Some(0.1), None], 1);
-        write_rows_to_buffer(&mut buffer, &meta, 1, vec![1, 2], vec![Some(1.1), None], 2);
-        write_rows_to_buffer(&mut buffer, &meta, 0, vec![2], vec![Some(1.1)], 3);
-        assert_eq!(5, buffer.num_rows());
-        let schema = memtable_schema_to_encoded_schema(&meta);
-        let batch = read_data_buffer_to_record_batches(schema, &buffer, Some(&[3, 1]), false, true)
-            .unwrap();
-
-        assert_eq!(
-            vec![1, 1, 3, 3, 3],
-            batch
-                .column_by_name(PK_INDEX_COLUMN_NAME)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(
-            vec![1, 2, 1, 2, 2],
-            batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .iter()
-                .map(|v| v.unwrap())
-                .collect::<Vec<_>>()
-        );
     }
 
     fn check_data_buffer_freeze(
@@ -1327,7 +1261,7 @@ mod tests {
             2,
         );
 
-        let mut iter = buffer.read(pk_weights).unwrap();
+        let mut iter = buffer.read().unwrap().build(pk_weights).unwrap();
         check_buffer_values_equal(&mut iter, expected);
     }
 
@@ -1348,7 +1282,7 @@ mod tests {
     fn test_iter_empty_data_buffer() {
         let meta = metadata_for_test();
         let buffer = DataBuffer::with_capacity(meta.clone(), 10, true);
-        let mut iter = buffer.read(Some(&[0, 1, 3, 2])).unwrap();
+        let mut iter = buffer.read().unwrap().build(Some(&[0, 1, 3, 2])).unwrap();
         check_buffer_values_equal(&mut iter, &[]);
     }
 

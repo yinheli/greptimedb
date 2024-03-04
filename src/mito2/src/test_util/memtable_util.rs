@@ -22,7 +22,6 @@ use api::v1::{Row, Rows, SemanticType};
 use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use datatypes::value::ValueRef;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
@@ -105,7 +104,7 @@ pub(crate) fn metadata_for_test() -> RegionMetadataRef {
 ///
 /// If `enable_table_id` is false, the schema is `k0, k1, ts, v0, v1`.
 /// If `enable_table_id` is true, the schema is `k0, __table_id, ts, v0, v1`.
-pub(crate) fn metadata_with_primary_key(
+pub fn metadata_with_primary_key(
     primary_key: Vec<ColumnId>,
     enable_table_id: bool,
 ) -> RegionMetadataRef {
@@ -159,7 +158,7 @@ fn semantic_type_of_column(column_id: ColumnId, primary_key: &[ColumnId]) -> Sem
 }
 
 /// Builds key values with `len` rows for test.
-pub(crate) fn build_key_values(
+pub fn build_key_values(
     schema: &RegionMetadataRef,
     k0: String,
     k1: u32,
@@ -196,7 +195,7 @@ pub(crate) fn write_rows_to_buffer(
     );
 
     for kv in kvs.iter() {
-        buffer.write_row(pk_index, kv);
+        buffer.write_row(pk_index, &kv);
     }
 }
 
@@ -289,16 +288,6 @@ pub(crate) fn encode_keys(
         let key = row_codec.encode(kv.primary_keys()).unwrap();
         keys.push(key);
     }
-}
-
-/// Encode one key.
-pub(crate) fn encode_key(k0: &str, k1: u32) -> Vec<u8> {
-    let row_codec = McmpRowCodec::new(vec![
-        SortField::new(ConcreteDataType::string_datatype()),
-        SortField::new(ConcreteDataType::uint32_datatype()),
-    ]);
-    let key = [ValueRef::String(k0), ValueRef::UInt32(k1)];
-    row_codec.encode(key.into_iter()).unwrap()
 }
 
 /// Encode one key.

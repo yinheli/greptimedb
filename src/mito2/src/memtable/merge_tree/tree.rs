@@ -16,17 +16,21 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
-use snafu::ensure;
+use datatypes::prelude::ValueRef;
+use memcomparable::Serializer;
+use serde::Serialize;
+use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
+use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::merge_tree::metrics::WriteMetrics;
@@ -35,6 +39,7 @@ use crate::memtable::merge_tree::partition::{
 };
 use crate::memtable::merge_tree::MergeTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
+use crate::metrics::{MERGE_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -52,6 +57,7 @@ pub struct MergeTree {
     is_partitioned: bool,
     /// Manager to report size of the tree.
     write_buffer_manager: Option<WriteBufferManagerRef>,
+    sparse_encoder: Arc<SparseEncoder>,
 }
 
 impl MergeTree {
@@ -67,6 +73,15 @@ impl MergeTree {
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
         );
+        let sparse_encoder = SparseEncoder {
+            fields: metadata
+                .primary_key_columns()
+                .map(|c| FieldWithId {
+                    field: SortField::new(c.column_schema.data_type.clone()),
+                    column_id: c.column_id,
+                })
+                .collect(),
+        };
         let is_partitioned = Partition::has_multi_partitions(&metadata);
 
         MergeTree {
@@ -76,6 +91,7 @@ impl MergeTree {
             partitions: Default::default(),
             is_partitioned,
             write_buffer_manager,
+            sparse_encoder: Arc::new(sparse_encoder),
         }
     }
 
@@ -114,9 +130,15 @@ impl MergeTree {
 
             // Encode primary key.
             pk_buffer.clear();
-            self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            if self.is_partitioned {
+                // Use sparse encoder for metric engine.
+                self.sparse_encoder
+                    .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            } else {
+                self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            }
 
-            // Write rows with primary keys.
+            // Write rows with
             self.write_with_key(pk_buffer, kv, metrics)?;
         }
 
@@ -132,6 +154,7 @@ impl MergeTree {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
+        let start = Instant::now();
         // Creates the projection set.
         let projection: HashSet<_> = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -148,11 +171,13 @@ impl MergeTree {
             })
             .unwrap_or_default();
 
-        let partitions = self.prune_partitions(&filters);
+        let mut tree_iter_metric = TreeIterMetrics::default();
+        let partitions = self.prune_partitions(&filters, &mut tree_iter_metric);
 
         let mut iter = TreeIter {
             partitions,
             current_reader: None,
+            metrics: tree_iter_metric,
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -162,6 +187,7 @@ impl MergeTree {
         );
         iter.fetch_next_partition(context)?;
 
+        iter.metrics.iter_elapsed += start.elapsed();
         Ok(Box::new(iter))
     }
 
@@ -246,6 +272,7 @@ impl MergeTree {
             partitions: RwLock::new(forked),
             is_partitioned: self.is_partitioned,
             write_buffer_manager: self.write_buffer_manager.clone(),
+            sparse_encoder: self.sparse_encoder.clone(),
         }
     }
 
@@ -256,14 +283,20 @@ impl MergeTree {
 
     fn write_with_key(
         &self,
-        primary_key: &[u8],
+        primary_key: &mut Vec<u8>,
         key_value: KeyValue,
         metrics: &mut WriteMetrics,
     ) -> Result<()> {
         let partition_key = Partition::get_partition_key(&key_value, self.is_partitioned);
         let partition = self.get_or_create_partition(partition_key);
 
-        partition.write_with_key(primary_key, key_value, metrics)
+        partition.write_with_key(
+            primary_key,
+            &self.row_codec,
+            key_value,
+            self.is_partitioned, // If tree is partitioned, re-encode is required to get the full primary key.
+            metrics,
+        )
     }
 
     fn write_no_key(&self, key_value: KeyValue) {
@@ -281,8 +314,13 @@ impl MergeTree {
             .clone()
     }
 
-    fn prune_partitions(&self, filters: &[SimpleFilterEvaluator]) -> VecDeque<PartitionRef> {
+    fn prune_partitions(
+        &self,
+        filters: &[SimpleFilterEvaluator],
+        metrics: &mut TreeIterMetrics,
+    ) -> VecDeque<PartitionRef> {
         let partitions = self.partitions.read().unwrap();
+        metrics.partitions_total = partitions.len();
         if !self.is_partitioned {
             return partitions.values().cloned().collect();
         }
@@ -308,27 +346,93 @@ impl MergeTree {
                 pruned.push_back(partition.clone());
             }
         }
-
+        metrics.partitions_after_pruning = pruned.len();
         pruned
     }
+}
+
+struct FieldWithId {
+    field: SortField,
+    column_id: ColumnId,
+}
+
+struct SparseEncoder {
+    fields: Vec<FieldWithId>,
+}
+
+impl SparseEncoder {
+    fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    where
+        I: Iterator<Item = ValueRef<'a>>,
+    {
+        let mut serializer = Serializer::new(buffer);
+        for (value, field) in row.zip(self.fields.iter()) {
+            if !value.is_null() {
+                field
+                    .column_id
+                    .serialize(&mut serializer)
+                    .context(SerializeFieldSnafu)?;
+                field.field.serialize(&mut serializer, &value)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TreeIterMetrics {
+    iter_elapsed: Duration,
+    fetch_partition_elapsed: Duration,
+    rows_fetched: usize,
+    batches_fetched: usize,
+    partitions_total: usize,
+    partitions_after_pruning: usize,
 }
 
 struct TreeIter {
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
+    metrics: TreeIterMetrics,
+}
+
+impl Drop for TreeIter {
+    fn drop(&mut self) {
+        READ_ROWS_TOTAL
+            .with_label_values(&["merge_tree_memtable"])
+            .inc_by(self.metrics.rows_fetched as u64);
+        MERGE_TREE_READ_STAGE_ELAPSED
+            .with_label_values(&["fetch_next_partition"])
+            .observe(self.metrics.fetch_partition_elapsed.as_secs_f64());
+        let scan_elapsed = self.metrics.iter_elapsed.as_secs_f64();
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan_memtable"])
+            .observe(scan_elapsed);
+        common_telemetry::debug!(
+            "TreeIter partitions total: {}, partitions after prune: {}, rows fetched: {}, batches fetched: {}, scan elapsed: {}",
+            self.metrics.partitions_total,
+            self.metrics.partitions_after_pruning,
+            self.metrics.rows_fetched,
+            self.metrics.batches_fetched,
+            scan_elapsed
+        );
+    }
 }
 
 impl Iterator for TreeIter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_batch().transpose()
+        let start = Instant::now();
+        let res = self.next_batch().transpose();
+        self.metrics.iter_elapsed += start.elapsed();
+        res
     }
 }
 
 impl TreeIter {
     /// Fetch next partition.
     fn fetch_next_partition(&mut self, mut context: ReadPartitionContext) -> Result<()> {
+        let start = Instant::now();
         while let Some(partition) = self.partitions.pop_front() {
             let part_reader = partition.read(context)?;
             if !part_reader.is_valid() {
@@ -338,7 +442,7 @@ impl TreeIter {
             self.current_reader = Some(part_reader);
             break;
         }
-
+        self.metrics.fetch_partition_elapsed += start.elapsed();
         Ok(())
     }
 
@@ -352,6 +456,8 @@ impl TreeIter {
         let batch = part_reader.convert_current_batch()?;
         part_reader.next()?;
         if part_reader.is_valid() {
+            self.metrics.rows_fetched += batch.num_rows();
+            self.metrics.batches_fetched += 1;
             return Ok(Some(batch));
         }
 
@@ -360,6 +466,8 @@ impl TreeIter {
         let context = part_reader.into_context();
         self.fetch_next_partition(context)?;
 
+        self.metrics.rows_fetched += batch.num_rows();
+        self.metrics.batches_fetched += 1;
         Ok(Some(batch))
     }
 }

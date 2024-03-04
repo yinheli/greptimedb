@@ -20,7 +20,9 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::merge_tree::data::{DataBatch, DataParts, DataPartsReader, DATA_INIT_CAP};
+use crate::memtable::merge_tree::data::{
+    DataBatch, DataParts, DataPartsReader, DataPartsReaderBuilder, DATA_INIT_CAP,
+};
 use crate::memtable::merge_tree::dict::KeyDictRef;
 use crate::memtable::merge_tree::merger::{Merger, Node};
 use crate::memtable::merge_tree::shard_builder::ShardBuilderReader;
@@ -52,19 +54,8 @@ impl Shard {
         }
     }
 
-    /// Returns the pk id of the key if it exists.
-    pub fn find_id_by_key(&self, key: &[u8]) -> Option<PkId> {
-        let key_dict = self.key_dict.as_ref()?;
-        let pk_index = key_dict.get_pk_index(key)?;
-
-        Some(PkId {
-            shard_id: self.shard_id,
-            pk_index,
-        })
-    }
-
     /// Writes a key value into the shard.
-    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: KeyValue) {
+    pub fn write_with_pk_id(&mut self, pk_id: PkId, key_value: &KeyValue) {
         debug_assert_eq!(self.shard_id, pk_id.shard_id);
 
         self.data_parts.write_row(pk_id.pk_index, key_value);
@@ -72,13 +63,13 @@ impl Shard {
 
     /// Scans the shard.
     // TODO(yingwen): Push down projection to data parts.
-    pub fn read(&self) -> Result<ShardReader> {
+    pub fn read(&self) -> Result<ShardReaderBuilder> {
         let parts_reader = self.data_parts.read()?;
 
-        Ok(ShardReader {
+        Ok(ShardReaderBuilder {
             shard_id: self.shard_id,
             key_dict: self.key_dict.clone(),
-            parts_reader,
+            inner: parts_reader,
         })
     }
 
@@ -132,6 +123,28 @@ pub trait DataBatchSource {
 }
 
 pub type BoxedDataBatchSource = Box<dyn DataBatchSource + Send>;
+
+pub struct ShardReaderBuilder {
+    shard_id: ShardId,
+    key_dict: Option<KeyDictRef>,
+    inner: DataPartsReaderBuilder,
+}
+
+impl ShardReaderBuilder {
+    pub(crate) fn build(self) -> Result<ShardReader> {
+        let ShardReaderBuilder {
+            shard_id,
+            key_dict,
+            inner,
+        } = self;
+        let parts_reader = inner.build()?;
+        Ok(ShardReader {
+            shard_id,
+            key_dict,
+            parts_reader,
+        })
+    }
+}
 
 /// Reader to read rows in a shard.
 pub struct ShardReader {
@@ -319,43 +332,54 @@ impl Node for ShardNode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use super::*;
+    use crate::memtable::merge_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::merge_tree::dict::KeyDictBuilder;
     use crate::memtable::merge_tree::metrics::WriteMetrics;
     use crate::memtable::merge_tree::PkIndex;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
-        build_key_values_with_ts_seq_values, encode_key, encode_key_by_kv, encode_keys,
-        metadata_for_test,
+        build_key_values_with_ts_seq_values, encode_keys, metadata_for_test,
     };
 
-    fn input_with_key(metadata: &RegionMetadataRef) -> Vec<KeyValues> {
+    /// Returns key values and expect pk index.
+    fn input_with_key(metadata: &RegionMetadataRef) -> Vec<(KeyValues, PkIndex)> {
         vec![
-            build_key_values_with_ts_seq_values(
-                metadata,
-                "shard".to_string(),
+            (
+                build_key_values_with_ts_seq_values(
+                    metadata,
+                    "shard".to_string(),
+                    2,
+                    [20, 21].into_iter(),
+                    [Some(0.0), Some(1.0)].into_iter(),
+                    0,
+                ),
                 2,
-                [20, 21].into_iter(),
-                [Some(0.0), Some(1.0)].into_iter(),
+            ),
+            (
+                build_key_values_with_ts_seq_values(
+                    metadata,
+                    "shard".to_string(),
+                    0,
+                    [0, 1].into_iter(),
+                    [Some(0.0), Some(1.0)].into_iter(),
+                    1,
+                ),
                 0,
             ),
-            build_key_values_with_ts_seq_values(
-                metadata,
-                "shard".to_string(),
-                0,
-                [0, 1].into_iter(),
-                [Some(0.0), Some(1.0)].into_iter(),
+            (
+                build_key_values_with_ts_seq_values(
+                    metadata,
+                    "shard".to_string(),
+                    1,
+                    [10, 11].into_iter(),
+                    [Some(0.0), Some(1.0)].into_iter(),
+                    2,
+                ),
                 1,
-            ),
-            build_key_values_with_ts_seq_values(
-                metadata,
-                "shard".to_string(),
-                1,
-                [10, 11].into_iter(),
-                [Some(0.0), Some(1.0)].into_iter(),
-                2,
             ),
         ]
     }
@@ -363,55 +387,51 @@ mod tests {
     fn new_shard_with_dict(
         shard_id: ShardId,
         metadata: RegionMetadataRef,
-        input: &[KeyValues],
+        input: &[(KeyValues, PkIndex)],
     ) -> Shard {
         let mut dict_builder = KeyDictBuilder::new(1024);
         let mut metrics = WriteMetrics::default();
         let mut keys = Vec::with_capacity(input.len());
-        for kvs in input {
+        for (kvs, _) in input {
             encode_keys(&metadata, kvs, &mut keys);
         }
         for key in &keys {
             dict_builder.insert_key(key, &mut metrics);
         }
 
-        let dict = dict_builder.finish().unwrap();
+        let dict = dict_builder.finish(&mut BTreeMap::new()).unwrap();
         let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
 
         Shard::new(shard_id, Some(Arc::new(dict)), data_parts, true)
     }
 
     #[test]
-    fn test_shard_find_by_key() {
-        let metadata = metadata_for_test();
-        let input = input_with_key(&metadata);
-        let shard = new_shard_with_dict(8, metadata, &input);
-        for i in 0..input.len() {
-            let key = encode_key("shard", i as u32);
-            assert_eq!(
-                PkId {
-                    shard_id: 8,
-                    pk_index: i as PkIndex,
-                },
-                shard.find_id_by_key(&key).unwrap()
-            );
-        }
-        assert!(shard.find_id_by_key(&encode_key("shard", 100)).is_none());
-    }
-
-    #[test]
-    fn test_write_shard() {
+    fn test_write_read_shard() {
         let metadata = metadata_for_test();
         let input = input_with_key(&metadata);
         let mut shard = new_shard_with_dict(8, metadata, &input);
         assert!(shard.is_empty());
-        for key_values in &input {
+        for (key_values, pk_index) in &input {
             for kv in key_values.iter() {
-                let key = encode_key_by_kv(&kv);
-                let pk_id = shard.find_id_by_key(&key).unwrap();
-                shard.write_with_pk_id(pk_id, kv);
+                let pk_id = PkId {
+                    shard_id: shard.shard_id,
+                    pk_index: *pk_index,
+                };
+                shard.write_with_pk_id(pk_id, &kv);
             }
         }
         assert!(!shard.is_empty());
+
+        let mut reader = shard.read().unwrap().build().unwrap();
+        let mut timestamps = Vec::new();
+        while reader.is_valid() {
+            let rb = reader.current_data_batch().slice_record_batch();
+            let ts_array = rb.column(1);
+            let ts_slice = timestamp_array_to_i64_slice(ts_array);
+            timestamps.extend_from_slice(ts_slice);
+
+            reader.next().unwrap();
+        }
+        assert_eq!(vec![0, 1, 10, 11, 20, 21], timestamps);
     }
 }

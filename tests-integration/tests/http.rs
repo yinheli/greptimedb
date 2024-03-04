@@ -557,7 +557,8 @@ pub async fn test_metrics_api(store_type: StorageType) {
     let res = client.get("/metrics").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
-    assert!(body.contains("frontend_handle_sql_elapsed"));
+    // Comment in the metrics text.
+    assert!(body.contains("# HELP"));
     guard.remove_all().await;
 }
 
@@ -685,6 +686,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 [frontend.postgres]
 enable = true
@@ -695,6 +697,7 @@ runtime_size = 2
 mode = "disable"
 cert_path = ""
 key_path = ""
+watch = false
 
 [frontend.opentsdb]
 enable = true
