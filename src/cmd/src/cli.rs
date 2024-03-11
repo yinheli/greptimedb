@@ -49,7 +49,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(tool: Box<dyn Tool>) -> Self {
+    pub fn new(tool: Box<dyn Tool>) -> Self {
         Self { tool }
     }
 }
