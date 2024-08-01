@@ -104,8 +104,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _timer = WRITE_STAGE_ELAPSED
                 .with_label_values(&["write_memtable"])
                 .start_timer();
-            for mut region_ctx in region_ctxs.into_values() {
+            // for mut region_ctx in region_ctxs.into_values() {
+            //     region_ctx.write_memtable();
+            //     put_rows += region_ctx.put_num;
+            //     delete_rows += region_ctx.delete_num;
+            // }
+
+            let futures = region_ctxs.into_values().map(|mut region_ctx| async move {
                 region_ctx.write_memtable();
+                region_ctx
+            });
+            let region_ctxs = futures::future::join_all(futures).await;
+            for region_ctx in region_ctxs {
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
             }
