@@ -110,14 +110,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             //     delete_rows += region_ctx.delete_num;
             // }
 
-            let futures = region_ctxs.into_values().map(|mut region_ctx| async move {
-                region_ctx.write_memtable();
-                region_ctx
+            let futures = region_ctxs.into_values().map(|mut region_ctx| {
+                common_runtime::spawn_global(async move {
+                    region_ctx.write_memtable();
+                    region_ctx
+                })
             });
-            let region_ctxs = futures::future::join_all(futures).await;
-            for region_ctx in region_ctxs {
-                put_rows += region_ctx.put_num;
-                delete_rows += region_ctx.delete_num;
+            let results = futures::future::join_all(futures).await;
+            for result in results {
+                match result {
+                    Ok(region_ctx) => {
+                        put_rows += region_ctx.put_num;
+                        delete_rows += region_ctx.delete_num;
+                    }
+                    Err(e) => {
+                        common_telemetry::error!(e; "Failed to write memtable");
+                    }
+                }
             }
         }
         WRITE_ROWS_TOTAL
