@@ -71,7 +71,7 @@ endif
 
 .PHONY: build
 build: ## Build debug version greptime.
-	cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
 
 .PHONY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
