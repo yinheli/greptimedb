@@ -14,6 +14,8 @@
 
 //! Utilities to remove duplicate rows from a sorted batch.
 
+use std::time::{Duration, Instant};
+
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_telemetry::debug;
@@ -504,6 +506,14 @@ pub(crate) struct LastNonNullIter<I> {
     /// fetch a new batch.
     /// The batch is always not empty.
     current_batch: Option<Batch>,
+    // Debug metrics:
+    num_batches: usize,
+    num_rows: usize,
+    num_splits: usize,
+    num_push_batches: usize,
+    num_return_batches: usize,
+    num_finish_batches: usize,
+    last_report: Instant,
 }
 
 impl<I> LastNonNullIter<I> {
@@ -516,6 +526,13 @@ impl<I> LastNonNullIter<I> {
             strategy: LastNonNull::new(false),
             metrics: DedupMetrics::default(),
             current_batch: None,
+            num_batches: 0,
+            num_rows: 0,
+            num_splits: 0,
+            num_push_batches: 0,
+            num_return_batches: 0,
+            num_finish_batches: 0,
+            last_report: Instant::now(),
         }
     }
 
@@ -555,9 +572,12 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
             }
 
             let batch = self.current_batch.as_ref().unwrap();
+            self.num_batches += 1;
+            self.num_rows += batch.num_rows();
+
             common_telemetry::info!(
-                "LastNonNullIter inner iter returns batch, region: {}, batch len: {}, timestamps: {:?}, batch: {:?}",
-                self.region_id, batch.num_rows(), batch.timestamps_native(), batch
+                "LastNonNullIter inner iter returns batch, region: {}, batch len: {}, timestamps: {:?}, batch_key: {:?}",
+                self.region_id, batch.num_rows(), batch.timestamps_native(), batch.primary_key()
             );
         }
 
@@ -566,6 +586,8 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
                 // No duplicate rows in the current batch.
                 return Ok(self.current_batch.take());
             };
+
+            self.num_splits += 1;
 
             let first = batch.slice(0, index + 1);
             let batch = batch.slice(index + 1, batch.num_rows() - index - 1);
@@ -580,11 +602,14 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
 
     fn next_batch(&mut self) -> Result<Option<Batch>> {
         while let Some(batch) = self.next_batch_for_merge()? {
+            self.num_push_batches += 1;
             if let Some(batch) = self.strategy.push_batch(batch, &mut self.metrics)? {
+                self.num_return_batches += 1;
                 return Ok(Some(batch));
             }
         }
 
+        self.num_finish_batches += 1;
         self.strategy.finish(&mut self.metrics)
     }
 }
@@ -593,6 +618,14 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LastNonNullIter<I> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.last_report.elapsed() > Duration::from_secs(5) {
+            self.last_report = Instant::now();
+            common_telemetry::info!(
+                "LastNonNullIter, region: {}, num_batches: {}, num_rows: {}, num_splits: {}, num_push_batches: {}, num_return_batches: {}, num_finish_batches: {}",
+                self.region_id, self.num_batches, self.num_rows, self.num_splits, self.num_push_batches, self.num_return_batches, self.num_finish_batches
+            );
+        }
+
         self.next_batch().transpose()
     }
 }
