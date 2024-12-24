@@ -589,10 +589,23 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
 
             self.num_splits += 1;
 
+            let num_rows_before = batch.num_rows();
+            assert!(!batch.is_empty());
+            assert!(
+                num_rows_before >= index + 1,
+                "batch is not large enough, {} < {}",
+                num_rows_before,
+                index + 1
+            );
             let first = batch.slice(0, index + 1);
             let batch = batch.slice(index + 1, batch.num_rows() - index - 1);
             // `index` is Some indicates that the batch has at least one row remaining.
-            debug_assert!(!batch.is_empty());
+            assert!(
+                !batch.is_empty(),
+                "batch is empty, rows_before: {}, index: {}",
+                num_rows_before,
+                index
+            );
             self.current_batch = Some(batch);
             return Ok(Some(first));
         }
