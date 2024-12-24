@@ -245,7 +245,7 @@ impl PartitionTree {
         iter.metrics.iter_elapsed += start.elapsed();
 
         if self.config.merge_mode == MergeMode::LastNonNull {
-            let iter = LastNonNullIter::new(iter);
+            let iter = LastNonNullIter::new(self.metadata.region_id, iter);
             Ok(Box::new(iter))
         } else {
             Ok(Box::new(iter))

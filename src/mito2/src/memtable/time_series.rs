@@ -239,7 +239,7 @@ impl Memtable for TimeSeriesMemtable {
             .iter_series(projection, filters, self.dedup)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
-            let iter = LastNonNullIter::new(iter);
+            let iter = LastNonNullIter::new(self.region_metadata.region_id, iter);
             Ok(Box::new(iter))
         } else {
             Ok(Box::new(iter))
@@ -853,7 +853,7 @@ impl IterBuilder for TimeSeriesIterBuilder {
         )?;
 
         if self.merge_mode == MergeMode::LastNonNull {
-            let iter = LastNonNullIter::new(iter);
+            let iter = LastNonNullIter::new(self.series_set.region_metadata.region_id, iter);
             Ok(Box::new(iter))
         } else {
             Ok(Box::new(iter))

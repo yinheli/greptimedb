@@ -22,6 +22,7 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::value::Value;
 use datatypes::vectors::MutableVector;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::metrics::MERGE_FILTER_ROWS_TOTAL;
@@ -492,6 +493,7 @@ impl DedupStrategy for LastNonNull {
 /// An iterator that dedup rows by [LastNonNull] strategy.
 /// The input iterator must returns sorted batches.
 pub(crate) struct LastNonNullIter<I> {
+    region_id: RegionId,
     /// Inner iterator that returns sorted batches.
     iter: Option<I>,
     /// Dedup strategy.
@@ -506,8 +508,9 @@ pub(crate) struct LastNonNullIter<I> {
 
 impl<I> LastNonNullIter<I> {
     /// Creates a new iterator with the given inner iterator.
-    pub(crate) fn new(iter: I) -> Self {
+    pub(crate) fn new(region_id: RegionId, iter: I) -> Self {
         Self {
+            region_id,
             iter: Some(iter),
             // We only use the iter in memtables. Memtables never filter deleted.
             strategy: LastNonNull::new(false),
@@ -544,8 +547,18 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
             if self.current_batch.is_none() {
                 // The iterator is exhausted.
                 self.iter = None;
+                common_telemetry::info!(
+                    "LastNonNullIter, inner iter returns None, region: {}",
+                    self.region_id
+                );
                 return Ok(None);
             }
+
+            let batch = self.current_batch.as_ref().unwrap();
+            common_telemetry::info!(
+                "LastNonNullIter inner iter returns batch, region: {}, batch len: {}, timestamps: {:?}, batch: {:?}",
+                self.region_id, batch.num_rows(), batch.timestamps_native(), batch
+            );
         }
 
         if let Some(batch) = &self.current_batch {
@@ -1135,7 +1148,7 @@ mod tests {
             &[(None, None), (Some(1), None), (Some(2), Some(22))],
         )];
         let iter = input.into_iter().map(Ok);
-        let iter = LastNonNullIter::new(iter);
+        let iter = LastNonNullIter::new(RegionId::new(0, 1), iter);
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         let expect = [
             new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
@@ -1163,7 +1176,7 @@ mod tests {
             ),
         ];
         let iter = input.into_iter().map(Ok);
-        let iter = LastNonNullIter::new(iter);
+        let iter = LastNonNullIter::new(RegionId::new(0, 1), iter);
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         let expect = [new_batch_multi_fields(
             b"k1",
@@ -1201,7 +1214,7 @@ mod tests {
             ),
         ];
         let iter = input.into_iter().map(Ok);
-        let iter = LastNonNullIter::new(iter);
+        let iter = LastNonNullIter::new(RegionId::new(0, 1), iter);
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         let expect = [
             new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
@@ -1255,7 +1268,7 @@ mod tests {
             ),
         ];
         let iter = input.into_iter().map(Ok);
-        let iter = LastNonNullIter::new(iter);
+        let iter = LastNonNullIter::new(RegionId::new(0, 1), iter);
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         let expect = [
             new_batch_no_fields(b"k1", &[1], &[13], &[OpType::Put]),
