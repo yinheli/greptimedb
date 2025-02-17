@@ -91,11 +91,12 @@ impl BoundedStager {
             .max_capacity(capacity)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .eviction_policy(EvictionPolicy::lru())
-            .async_eviction_listener(move |k, v, _| {
+            .async_eviction_listener(move |k, v, reason| {
                 common_telemetry::info!(
-                    "[STAGING] Evict cache, key: {}, path: {:?}, size: {}",
+                    "[STAGING] Evict cache, key: {}, path: {:?}, reason: {:?}, size: {}",
                     k.as_str(),
                     v.path(),
+                    reason,
                     v.size()
                 );
 
