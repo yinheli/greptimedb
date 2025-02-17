@@ -334,6 +334,17 @@ impl ScanRegion {
             self.version.options.append_mode,
         );
 
+        if files.len() < 200 {
+            debug!(
+                "[STAGING] Scan region {}, metadata: {:?}, request: {:?}, memtables: {}, ssts: {:?}",
+                self.version.metadata.region_id,
+                self.version.metadata,
+                self.request,
+                memtables.len(),
+                files,
+            );
+        }
+
         // Remove field filters for LastNonNull mode after logging the request.
         self.maybe_remove_field_filters();
 

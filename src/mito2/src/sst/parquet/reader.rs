@@ -229,7 +229,7 @@ impl ParquetReaderBuilder {
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
-            file_path,
+            file_path: file_path.clone(),
             parquet_meta,
             object_store: self.object_store.clone(),
             projection: projection_mask,
@@ -257,7 +257,14 @@ impl ParquetReaderBuilder {
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
 
-        metrics.build_cost += start.elapsed();
+        let elapsed = start.elapsed();
+        common_telemetry::info!(
+            "[STAGING] Build reader input done, region: {}, file_path: {}, elapsed: {:?}",
+            self.file_handle.file_id(),
+            file_path,
+            elapsed
+        );
+        metrics.build_cost += elapsed;
 
         Ok((context, row_groups))
     }

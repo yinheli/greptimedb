@@ -92,6 +92,13 @@ impl BoundedStager {
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .eviction_policy(EvictionPolicy::lru())
             .async_eviction_listener(move |k, v, _| {
+                common_telemetry::info!(
+                    "[STAGING] Evict cache, key: {}, path: {:?}, size: {}",
+                    k.as_str(),
+                    v.path(),
+                    v.size()
+                );
+
                 let recycle_bin = recycle_bin_cloned.clone();
                 if let Some(notifier) = notifier_cloned.as_ref() {
                     notifier.on_cache_evict(v.size());
@@ -142,6 +149,13 @@ impl Stager for BoundedStager {
         let v = self
             .cache
             .try_get_with_by_ref(&cache_key, async {
+                common_telemetry::info!(
+                    "[STAGING] Get blob cache miss, puffin: {}, key: {}, cache_key: {}",
+                    puffin_file_name,
+                    key,
+                    cache_key
+                );
+
                 if let Some(v) = self.recycle_bin.remove(&cache_key).await {
                     if let Some(notifier) = self.notifier.as_ref() {
                         let size = v.size();
@@ -169,6 +183,14 @@ impl Stager for BoundedStager {
                 Ok(CacheValue::File(guard))
             })
             .await
+            .inspect_err(|e| {
+                common_telemetry::error!(
+                    e; "[STAGING] Get blob error, puffin: {}, key: {}, cache_key: {}",
+                    puffin_file_name,
+                    key,
+                    cache_key,
+                );
+            })
             .context(CacheGetSnafu)?;
 
         if let Some(notifier) = self.notifier.as_ref() {
@@ -202,6 +224,14 @@ impl Stager for BoundedStager {
                         notifier.on_cache_insert(size);
                         notifier.on_recycle_clear(size);
                     }
+
+                    common_telemetry::info!(
+                        "[STAGING] Get dir cache miss, get from recycle bin, puffin: {}, key: {}, cache_key: {}, path: {:?}",
+                        puffin_file_name,
+                        key,
+                        cache_key,
+                        v.path(),
+                    );
                     return Ok(v);
                 }
 
@@ -210,6 +240,15 @@ impl Stager for BoundedStager {
                 let dir_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&dir_name);
 
+                common_telemetry::info!(
+                    "[STAGING] Get dir cache miss, init again, puffin: {}, key: {}, cache_key: {}, path: {}",
+                    puffin_file_name,
+                    key,
+                    cache_key,
+                    dir_name,
+                );
+
+                let start = Instant::now();
                 let size = Self::write_dir(&path, init_fn).await?;
                 if let Some(notifier) = self.notifier.as_ref() {
                     notifier.on_cache_insert(size);
@@ -220,9 +259,28 @@ impl Stager for BoundedStager {
                     size,
                     delete_queue: self.delete_queue.clone(),
                 });
+
+                common_telemetry::info!(
+                    "[STAGING] Get dir cache miss, init done, puffin: {}, key: {}, cache_key: {}, path: {}, size: {}, cost: {:?}",
+                    puffin_file_name,
+                    key,
+                    cache_key,
+                    dir_name,
+                    size,
+                    start.elapsed(),
+                );
+
                 Ok(CacheValue::Dir(guard))
             })
             .await
+            .inspect_err(|e| {
+                common_telemetry::error!(
+                    e; "[STAGING] Get dir error, puffin: {}, key: {}, cache_key: {}",
+                    puffin_file_name,
+                    key,
+                    cache_key,
+                );
+            })
             .context(CacheGetSnafu)?;
 
         if let Some(notifier) = self.notifier.as_ref() {
@@ -250,6 +308,15 @@ impl Stager for BoundedStager {
         self.cache
             .try_get_with(cache_key.clone(), async move {
                 if let Some(v) = self.recycle_bin.remove(&cache_key).await {
+                    common_telemetry::info!(
+                        "[STAGING] Put dir, reuse recycle bin, puffin: {}, key: {}, cache_key: {}, size: {}, path: {:?}",
+                        puffin_file_name,
+                        key,
+                        cache_key,
+                        size,
+                        v.path(),
+                    );
+
                     if let Some(notifier) = self.notifier.as_ref() {
                         let size = v.size();
                         notifier.on_cache_insert(size);
@@ -260,6 +327,15 @@ impl Stager for BoundedStager {
 
                 let dir_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&dir_name);
+
+                common_telemetry::info!(
+                    "[STAGING] Put dir, write new, puffin: {}, key: {}, cache_key: {}, size: {}, path: {:?}",
+                    puffin_file_name,
+                    key,
+                    cache_key,
+                    size,
+                    dir_name,
+                );
 
                 fs::rename(&dir_path, &path).await.context(RenameSnafu)?;
                 if let Some(notifier) = self.notifier.as_ref() {
@@ -377,6 +453,13 @@ impl BoundedStager {
                         size,
                         delete_queue: self.delete_queue.clone(),
                     }));
+
+                    common_telemetry::info!(
+                        "[STAGING] Recover dir, path: {}, size: {}",
+                        file_path,
+                        size
+                    );
+
                     // A duplicate dir will be moved to the delete queue.
                     let _dup_dir = elems.insert(key, v);
                 } else {
@@ -386,6 +469,13 @@ impl BoundedStager {
                         size,
                         delete_queue: self.delete_queue.clone(),
                     }));
+
+                    common_telemetry::info!(
+                        "[STAGING] Recover blob, path: {}, size: {}",
+                        file_path,
+                        size
+                    );
+
                     // A duplicate file will be moved to the delete queue.
                     let _dup_file = elems.insert(key, v);
                 }
@@ -505,6 +595,13 @@ impl CacheValue {
 
     fn weight(&self) -> u32 {
         self.size().try_into().unwrap_or(u32::MAX)
+    }
+
+    fn path(&self) -> &PathBuf {
+        match self {
+            CacheValue::File(guard) => &guard.path,
+            CacheValue::Dir(guard) => &guard.path,
+        }
     }
 }
 

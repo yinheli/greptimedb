@@ -83,6 +83,13 @@ impl FulltextIndexApplier {
                 }
             };
 
+            common_telemetry::info!(
+                "[STAGING] Try to search for file {}, column {}, path: {:?}",
+                file_id,
+                column_id,
+                path
+            );
+
             let searcher =
                 TantivyFulltextIndexSearcher::new(path).context(ApplyFulltextIndexSnafu)?;
             let result = searcher
