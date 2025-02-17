@@ -76,6 +76,9 @@ impl FileCache {
                 let store = cache_store.clone();
                 // Stores files under FILE_DIR.
                 let file_path = cache_file_path(FILE_DIR, *key);
+
+                common_telemetry::info!("[WRITE] write cache evict, file_path: {}, cause: {:?}, size: {}", file_path, cause, value.file_size);
+
                 async move {
                     if let RemovalCause::Replaced = cause {
                         // The cache is replaced by another file. This is unexpected, we don't remove the same

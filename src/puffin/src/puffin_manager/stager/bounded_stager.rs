@@ -287,6 +287,14 @@ impl Stager for BoundedStager {
             if miss {
                 notifier.on_cache_miss(v.size());
             } else {
+                common_telemetry::info!(
+                    "[STAGING] Get dir cache hit, puffin: {}, key: {}, cache_key: {}, size: {}",
+                    puffin_file_name,
+                    key,
+                    cache_key,
+                    v.size(),
+                );
+
                 notifier.on_cache_hit(v.size());
             }
         }
