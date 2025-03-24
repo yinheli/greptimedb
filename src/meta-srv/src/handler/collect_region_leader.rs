@@ -20,10 +20,10 @@ use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
-pub struct CollectLeaderRegionHanlder;
+pub struct CollectLeaderRegionHandler;
 
 #[async_trait::async_trait]
-impl HeartbeatHandler for CollectLeaderRegionHanlder {
+impl HeartbeatHandler for CollectLeaderRegionHandler {
     fn is_acceptable(&self, role: Role) -> bool {
         role == Role::Datanode
     }
@@ -139,7 +139,7 @@ mod tests {
             ..Default::default()
         };
 
-        let handler = CollectLeaderRegionHanlder;
+        let handler = CollectLeaderRegionHandler;
         let control = handler
             .handle(&HeartbeatRequest::default(), &mut ctx, &mut acc)
             .await
