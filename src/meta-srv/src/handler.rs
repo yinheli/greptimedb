@@ -62,6 +62,7 @@ use crate::service::mailbox::{
 
 pub mod check_leader_handler;
 pub mod collect_cluster_info_handler;
+pub mod collect_region_leader;
 pub mod collect_stats_handler;
 pub mod extract_stat_handler;
 pub mod failure_handler;
@@ -96,7 +97,7 @@ pub trait HeartbeatHandler: Send + Sync {
 /// HandleControl
 ///
 /// Controls process of handling heartbeat request.
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum HandleControl {
     Continue,
     Done,
