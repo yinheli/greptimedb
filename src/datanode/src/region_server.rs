@@ -51,6 +51,7 @@ use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::manifest::ManifestVersion;
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
@@ -305,6 +306,22 @@ impl RegionServer {
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
             .set_region_role(region_id, role)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
+    pub async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .sync_region(region_id, manifest_version)
+            .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
