@@ -277,6 +277,11 @@ impl MitoRegion {
         }
     }
 
+    /// Returns the manifest version.
+    pub(crate) fn manifest_version(&self) -> ManifestVersion {
+        self.stats.manifest_version()
+    }
+
     /// Returns the region statistic.
     pub(crate) fn region_statistic(&self) -> RegionStatistic {
         let version = self.version();

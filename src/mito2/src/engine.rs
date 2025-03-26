@@ -70,7 +70,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing;
+use common_telemetry::{debug, tracing};
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use futures::future::{join_all, try_join_all};
 use object_store::manager::ObjectStoreManagerRef;
@@ -496,6 +496,17 @@ impl EngineInner {
         region_id: RegionId,
         manifest_version: ManifestVersion,
     ) -> Result<ManifestVersion> {
+        // Fast path: check if the region manifest version is greater than the requested manifest version.
+        let region = self
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        let region_manifest_version = region.manifest_version();
+        if region_manifest_version > manifest_version {
+            debug!("region {region_id} manifest version {region_manifest_version} is greater than {manifest_version}, skip sync");
+            return Ok(region_manifest_version);
+        }
+        // Slow path: send request to worker loop to sync the region.
         let (request, receiver) =
             WorkerRequest::new_sync_region_request(region_id, manifest_version);
         self.workers.submit_to_worker(region_id, request).await?;

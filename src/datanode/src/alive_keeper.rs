@@ -391,8 +391,10 @@ impl CountdownTask {
                             if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
                                 error!(err; "Failed to set region role to {role} for region {region_id}");
                             }
-                            if let Err(err) = self.region_server.sync_region(self.region_id, manifest_version).await {
-                                error!(err; "Failed to sync region {region_id}, manifest version: {manifest_version}");
+                            if role == RegionRole::Follower {
+                                if let Err(err) = self.region_server.sync_region(self.region_id, manifest_version).await {
+                                    error!(err; "Failed to sync region {region_id}, manifest version: {manifest_version}");
+                                }
                             }
                             trace!(
                                 "Reset deadline of region {region_id} to approximately {} seconds later.",
