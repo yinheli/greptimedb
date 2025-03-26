@@ -26,6 +26,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
+use store_api::manifest::ManifestVersion;
 use store_api::region_engine::RegionRole;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -114,7 +115,9 @@ impl RegionAliveKeeper {
         for region in regions {
             let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
-                handle.reset_deadline(role, deadline).await;
+                handle
+                    .reset_deadline(role, deadline, region.manifest_version)
+                    .await;
             } else {
                 warn!(
                     "Trying to renew the lease for region {region_id}, the keeper handler is not found!"
@@ -266,7 +269,7 @@ enum CountdownCommand {
     Start(u64),
     /// Reset countdown deadline to the given instance.
     /// (NextRole, Deadline)
-    Reset((RegionRole, Instant)),
+    Reset((RegionRole, Instant, ManifestVersion)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -323,10 +326,15 @@ impl CountdownTaskHandle {
         None
     }
 
-    async fn reset_deadline(&self, role: RegionRole, deadline: Instant) {
+    async fn reset_deadline(
+        &self,
+        role: RegionRole,
+        deadline: Instant,
+        manifest_version: ManifestVersion,
+    ) {
         if let Err(e) = self
             .tx
-            .send(CountdownCommand::Reset((role, deadline)))
+            .send(CountdownCommand::Reset((role, deadline, manifest_version)))
             .await
         {
             warn!(
@@ -379,9 +387,12 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, deadline))) => {
+                        Some(CountdownCommand::Reset((role, deadline, manifest_version))) => {
                             if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
                                 error!(err; "Failed to set region role to {role} for region {region_id}");
+                            }
+                            if let Err(err) = self.region_server.sync_region(self.region_id, manifest_version).await {
+                                error!(err; "Failed to sync region {region_id}, manifest version: {manifest_version}");
                             }
                             trace!(
                                 "Reset deadline of region {region_id} to approximately {} seconds later.",
@@ -527,6 +538,7 @@ mod test {
             .reset_deadline(
                 RegionRole::Leader,
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
+                0,
             )
             .await;
         assert!(
