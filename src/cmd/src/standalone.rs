@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -54,9 +55,9 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{Instance as FeInstance, StandaloneDatanodeManager};
+use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::server::Services;
 use frontend::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
@@ -66,7 +67,7 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use query::stats::StatementStatistics;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
+use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -75,9 +76,15 @@ use snafu::ResultExt;
 use tokio::sync::{broadcast, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::Result;
+use crate::error::{
+    BuildCacheRegistrySnafu, BuildWalOptionsAllocatorSnafu, CreateDirSnafu, IllegalConfigSnafu,
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{error, log_versions, App};
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-standalone";
 
@@ -244,14 +251,22 @@ impl StandaloneOptions {
 
 pub struct Instance {
     datanode: Datanode,
-    frontend: Frontend,
+    frontend: FeInstance,
     // TODO(discord9): wrapped it in flownode instance instead
     flow_worker_manager: Arc<FlowWorkerManager>,
     flow_shutdown: broadcast::Sender<()>,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
+
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+impl Instance {
+    /// Find the socket addr of a server by its `name`.
+    pub async fn server_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.frontend.server_handlers().addr(name).await
+    }
 }
 
 #[async_trait]
@@ -266,26 +281,21 @@ impl App for Instance {
         self.procedure_manager
             .start()
             .await
-            .context(error::StartProcedureManagerSnafu)?;
+            .context(StartProcedureManagerSnafu)?;
 
         self.wal_options_allocator
             .start()
             .await
-            .context(error::StartWalOptionsAllocatorSnafu)?;
+            .context(StartWalOptionsAllocatorSnafu)?;
 
-        plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
+        plugins::start_frontend_plugins(self.frontend.plugins().clone())
             .await
-            .context(error::StartFrontendSnafu)?;
+            .context(StartFrontendSnafu)?;
 
-        self.frontend
-            .start()
-            .await
-            .context(error::StartFrontendSnafu)?;
-
+        self.frontend.start().await.context(StartFrontendSnafu)?;
         self.flow_worker_manager
             .clone()
             .run_background(Some(self.flow_shutdown.subscribe()));
-
         Ok(())
     }
 
@@ -293,18 +303,17 @@ impl App for Instance {
         self.frontend
             .shutdown()
             .await
-            .context(error::ShutdownFrontendSnafu)?;
+            .context(ShutdownFrontendSnafu)?;
 
         self.procedure_manager
             .stop()
             .await
-            .context(error::StopProcedureManagerSnafu)?;
+            .context(StopProcedureManagerSnafu)?;
 
         self.datanode
             .shutdown()
             .await
-            .context(error::ShutdownDatanodeSnafu)?;
-
+            .context(ShutdownDatanodeSnafu)?;
         self.flow_shutdown
             .send(())
             .map_err(|_e| {
@@ -313,8 +322,7 @@ impl App for Instance {
                 }
                 .build()
             })
-            .context(error::ShutdownFlownodeSnafu)?;
-
+            .context(ShutdownFlownodeSnafu)?;
         info!("Datanode instance stopped.");
 
         Ok(())
@@ -360,7 +368,7 @@ impl StartCommand {
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
         )
-        .context(error::LoadLayeredConfigSnafu)?;
+        .context(LoadLayeredConfigSnafu)?;
 
         self.merge_with_cli_options(global_options, &mut opts.component)?;
 
@@ -407,7 +415,7 @@ impl StartCommand {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
             if addr.eq(&datanode_grpc_addr) {
-                return error::IllegalConfigSnafu {
+                return IllegalConfigSnafu {
                     msg: format!(
                         "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
                     ),
@@ -466,19 +474,18 @@ impl StartCommand {
 
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
             .await
-            .context(error::StartFrontendSnafu)?;
+            .context(StartFrontendSnafu)?;
 
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &dn_opts)
             .await
-            .context(error::StartDatanodeSnafu)?;
+            .context(StartDatanodeSnafu)?;
 
-        set_default_timezone(fe_opts.default_timezone.as_deref())
-            .context(error::InitTimezoneSnafu)?;
+        set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
         let data_home = &dn_opts.storage.data_home;
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(data_home))
-            .context(error::CreateDirSnafu { dir: data_home })?;
+            .context(CreateDirSnafu { dir: data_home })?;
 
         let metadata_dir = metadata_store_dir(data_home);
         let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
@@ -487,7 +494,7 @@ impl StartCommand {
             opts.procedure,
         )
         .await
-        .context(error::StartFrontendSnafu)?;
+        .context(StartFrontendSnafu)?;
 
         // Builds cache registry
         let layered_cache_builder = LayeredCacheRegistryBuilder::default();
@@ -496,7 +503,7 @@ impl StartCommand {
             with_default_composite_cache_registry(
                 layered_cache_builder.add_cache_registry(fundamental_cache_registry),
             )
-            .context(error::BuildCacheRegistrySnafu)?
+            .context(BuildCacheRegistrySnafu)?
             .build(),
         );
 
@@ -505,7 +512,7 @@ impl StartCommand {
             .with_cache_registry(layered_cache_registry.clone())
             .build()
             .await
-            .context(error::StartDatanodeSnafu)?;
+            .context(StartDatanodeSnafu)?;
 
         let information_extension = Arc::new(StandaloneInformationExtension::new(
             datanode.region_server(),
@@ -538,7 +545,7 @@ impl StartCommand {
                 .build()
                 .await
                 .map_err(BoxedError::new)
-                .context(error::OtherSnafu)?,
+                .context(OtherSnafu)?,
         );
 
         // set the ref to query for the local flow state
@@ -569,7 +576,7 @@ impl StartCommand {
         let kafka_options = opts.wal.clone().into();
         let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
             .await
-            .context(error::BuildWalOptionsAllocatorSnafu)?;
+            .context(BuildWalOptionsAllocatorSnafu)?;
         let wal_options_allocator = Arc::new(wal_options_allocator);
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
@@ -590,8 +597,8 @@ impl StartCommand {
         )
         .await?;
 
-        let fe_instance = FrontendBuilder::new(
-            fe_opts.clone(),
+        let mut frontend = FrontendBuilder::new(
+            fe_opts,
             kv_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager.clone(),
@@ -602,8 +609,7 @@ impl StartCommand {
         .with_plugin(plugins.clone())
         .try_build()
         .await
-        .context(error::StartFrontendSnafu)?;
-        let fe_instance = Arc::new(fe_instance);
+        .context(StartFrontendSnafu)?;
 
         let flow_worker_manager = flownode.flow_worker_manager();
         // flow server need to be able to use frontend to write insert requests back
@@ -616,25 +622,18 @@ impl StartCommand {
             node_manager,
         )
         .await
-        .context(error::StartFlownodeSnafu)?;
+        .context(StartFlownodeSnafu)?;
         flow_worker_manager.set_frontend_invoker(invoker).await;
 
         let (tx, _rx) = broadcast::channel(1);
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
-        let servers = Services::new(opts, fe_instance.clone(), plugins)
+        let servers = Services::new(opts, Arc::new(frontend.clone()), plugins)
             .build()
             .await
-            .context(error::StartFrontendSnafu)?;
-
-        let frontend = Frontend {
-            instance: fe_instance,
-            servers,
-            heartbeat_task: None,
-            export_metrics_task,
-        };
+            .context(StartFrontendSnafu)?;
+        frontend
+            .build_servers(servers)
+            .context(StartFrontendSnafu)?;
 
         Ok(Instance {
             datanode,
@@ -671,7 +670,7 @@ impl StartCommand {
                 procedure_manager,
                 true,
             )
-            .context(error::InitDdlManagerSnafu)?,
+            .context(InitDdlManagerSnafu)?,
         );
 
         Ok(procedure_executor)
@@ -685,7 +684,7 @@ impl StartCommand {
         table_metadata_manager
             .init()
             .await
-            .context(error::InitMetadataSnafu)?;
+            .context(InitMetadataSnafu)?;
 
         Ok(table_metadata_manager)
     }

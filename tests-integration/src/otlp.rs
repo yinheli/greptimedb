@@ -37,7 +37,7 @@ mod test {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_otlp")
             .build()
             .await;
-        let instance = standalone.fe_instance();
+        let instance = &standalone.instance;
 
         test_otlp(instance).await;
     }

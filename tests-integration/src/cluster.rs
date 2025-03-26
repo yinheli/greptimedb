@@ -45,10 +45,10 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::Instance as FeInstance;
+use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
@@ -58,7 +58,6 @@ use query::stats::StatementStatistics;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
-use servers::server::ServerHandlers;
 use servers::Mode;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
@@ -79,13 +78,7 @@ pub struct GreptimeDbCluster {
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
-    pub frontend: Arc<Frontend>,
-}
-
-impl GreptimeDbCluster {
-    pub fn fe_instance(&self) -> &Arc<FeInstance> {
-        &self.frontend.instance
-    }
+    pub frontend: Arc<FeInstance>,
 }
 
 pub struct GreptimeDbClusterBuilder {
@@ -217,7 +210,7 @@ impl GreptimeDbClusterBuilder {
 
         let frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
 
-        test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
+        test_util::prepare_another_catalog_and_schema(frontend.as_ref()).await;
 
         frontend.start().await.unwrap();
 
@@ -361,7 +354,7 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
-    ) -> Arc<Frontend> {
+    ) -> Arc<FeInstance> {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
             .enable_access_cluster_info()
@@ -420,18 +413,12 @@ impl GreptimeDbClusterBuilder {
             StatementStatistics::default(),
         )
         .with_local_cache_invalidator(cache_registry)
+        .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
         .unwrap();
-        let instance = Arc::new(instance);
 
-        Frontend {
-            instance,
-            servers: ServerHandlers::new(),
-            heartbeat_task: Some(heartbeat_task),
-            export_metrics_task: None,
-        }
-        .into()
+        Arc::new(instance)
     }
 }
 

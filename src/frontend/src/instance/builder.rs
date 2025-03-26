@@ -35,10 +35,12 @@ use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::stats::StatementStatistics;
 use query::QueryEngineFactory;
+use servers::server::ServerHandlers;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
+use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
 use crate::limiter::Limiter;
@@ -53,6 +55,7 @@ pub struct FrontendBuilder {
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
+    heartbeat_task: Option<HeartbeatTask>,
     stats: StatementStatistics,
 }
 
@@ -75,6 +78,7 @@ impl FrontendBuilder {
             node_manager,
             plugins: None,
             procedure_executor,
+            heartbeat_task: None,
             stats,
         }
     }
@@ -89,6 +93,13 @@ impl FrontendBuilder {
     pub fn with_plugin(self, plugins: Plugins) -> Self {
         Self {
             plugins: Some(plugins),
+            ..self
+        }
+    }
+
+    pub fn with_heartbeat_task(self, heartbeat_task: HeartbeatTask) -> Self {
+        Self {
+            heartbeat_task: Some(heartbeat_task),
             ..self
         }
     }
@@ -191,13 +202,17 @@ impl FrontendBuilder {
             });
 
         Ok(Instance {
+            options: self.options,
             catalog_manager: self.catalog_manager,
             pipeline_operator,
             statement_executor,
             query_engine,
             plugins,
+            servers: ServerHandlers::default(),
+            heartbeat_task: self.heartbeat_task,
             inserter,
             deleter,
+            export_metrics_task: None,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
             stats: self.stats,
             limiter,
