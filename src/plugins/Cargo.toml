@@ -18,3 +18,4 @@ frontend.workspace = true
 meta-srv.workspace = true
 serde.workspace = true
 snafu.workspace = true
+strum.workspace = true

@@ -24,6 +24,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_telemetry::tracing::info;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -31,7 +32,7 @@ use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
-use partition::manager::PartitionRuleManager;
+use partition::manager::{PartitionRuleManager, ReadPreferenceApplierRef};
 use pipeline::pipeline_operator::PipelineOperator;
 use query::stats::StatementStatistics;
 use query::QueryEngineFactory;
@@ -104,10 +105,15 @@ impl FrontendBuilder {
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_ROUTE_CACHE_NAME,
                 })?;
-        let partition_manager = Arc::new(PartitionRuleManager::new(
-            kv_backend.clone(),
-            table_route_cache.clone(),
-        ));
+        let read_preference_applier = plugins.get::<ReadPreferenceApplierRef>();
+        let mut partition_manager =
+            PartitionRuleManager::new(kv_backend.clone(), table_route_cache.clone());
+        if let Some(read_preference_applier) = read_preference_applier {
+            info!("Build partition_manager with read preference applier");
+            partition_manager.set_read_preference_applier(read_preference_applier);
+        }
+
+        let partition_manager = Arc::new(partition_manager);
 
         let local_cache_invalidator = self
             .local_cache_invalidator

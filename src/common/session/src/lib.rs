@@ -12,22 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use strum::{AsRefStr, Display, EnumString};
 
-use async_trait::async_trait;
-use common_query::request::QueryRequest;
-use common_recordbatch::SendableRecordBatchStream;
-use session::ReadPreference;
-
-use crate::error::Result;
-
-#[async_trait]
-pub trait RegionQueryHandler: Send + Sync {
-    async fn do_get(
-        &self,
-        read_preference: ReadPreference,
-        request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream>;
+/// Defines the read preference for frontend route operations,
+/// determining whether to read from the region leader or follower.
+#[derive(Debug, Clone, Copy, Default, EnumString, Display, AsRefStr)]
+pub enum ReadPreference {
+    #[default]
+    // Reads all operations from the region leader. This is the default mode.
+    #[strum(serialize = "leader", to_string = "LEADER")]
+    Leader,
 }
-
-pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;

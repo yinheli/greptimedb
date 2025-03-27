@@ -19,6 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::Expr;
+use session::ReadPreference;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -145,6 +146,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Failed to find peer of region {}, read preference: {}",
+        region_id,
+        read_preference
+    ))]
+    FindPeer {
+        region_id: RegionId,
+        read_preference: ReadPreference,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable {
         #[snafu(implicit)]
@@ -193,7 +206,9 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
+            Error::GetCache { .. } | Error::FindLeader { .. } | Error::FindPeer { .. } => {
+                StatusCode::StorageUnavailable
+            }
             Error::FindRegionRoutes { .. } => StatusCode::RegionNotReady,
 
             Error::ConjunctExprWithNonExpr { .. }

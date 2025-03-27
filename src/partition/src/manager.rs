@@ -23,12 +23,13 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::prelude::Value;
+use session::ReadPreference;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::columns::RangeColumnsPartitionRule;
-use crate::error::{FindLeaderSnafu, Result};
+use crate::error::{FindLeaderSnafu, FindPeerSnafu, Result};
 use crate::multi_dim::MultiDimPartitionRule;
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
@@ -51,6 +52,18 @@ pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 pub struct PartitionRuleManager {
     table_route_manager: TableRouteManager,
     table_route_cache: TableRouteCacheRef,
+    read_preference_applier: Option<ReadPreferenceApplierRef>,
+}
+
+pub type ReadPreferenceApplierRef = Arc<dyn ReadPreferenceApplier>;
+
+pub trait ReadPreferenceApplier: Send + Sync {
+    fn apply(
+        &self,
+        region_routes: &[RegionRoute],
+        region_id: RegionId,
+        read_preference: ReadPreference,
+    ) -> Option<Peer>;
 }
 
 #[derive(Debug)]
@@ -64,7 +77,13 @@ impl PartitionRuleManager {
         Self {
             table_route_manager: TableRouteManager::new(kv_backend),
             table_route_cache,
+            read_preference_applier: None,
         }
+    }
+
+    /// Set the read preference applier.
+    pub fn set_read_preference_applier(&mut self, applier: ReadPreferenceApplierRef) {
+        self.read_preference_applier = Some(applier);
     }
 
     pub async fn find_physical_table_route(
@@ -257,6 +276,7 @@ impl PartitionRuleManager {
         Ok(regions)
     }
 
+    /// Find the leader of the region.
     pub async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
         let region_routes = &self
             .find_physical_table_route(region_id.table_id())
@@ -269,6 +289,31 @@ impl PartitionRuleManager {
                 table_id: region_id.table_id(),
             },
         )
+    }
+
+    /// Find a peer of the region by read preference.
+    pub async fn find_region_peer(
+        &self,
+        region_id: RegionId,
+        read_preference: ReadPreference,
+    ) -> Result<Peer> {
+        if let Some(applier) = &self.read_preference_applier {
+            let region_routes = &self
+                .find_physical_table_route(region_id.table_id())
+                .await?
+                .region_routes;
+
+            let peer = applier
+                .apply(region_routes, region_id, read_preference)
+                .context(FindPeerSnafu {
+                    region_id,
+                    read_preference,
+                })?;
+            Ok(peer)
+        } else {
+            // By default, we use the leader of the region as the peer.
+            self.find_region_leader(region_id).await
+        }
     }
 
     pub async fn split_rows(
