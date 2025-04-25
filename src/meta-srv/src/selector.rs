@@ -23,6 +23,7 @@ pub mod weighted_choose;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 use strum::AsRefStr;
 
 use crate::error;
@@ -34,6 +35,19 @@ pub trait Selector: Send + Sync {
     type Output;
 
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output>;
+}
+
+#[async_trait::async_trait]
+pub trait RegionFailoverDestPeerSelector: Send + Sync {
+    type Context;
+    type Output;
+
+    async fn select(
+        &self,
+        ctx: &Self::Context,
+        from_peer_id: u64,
+        region_ids: Vec<RegionId>,
+    ) -> Result<Self::Output>;
 }
 
 #[derive(Debug)]
