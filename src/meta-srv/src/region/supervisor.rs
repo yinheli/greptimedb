@@ -22,7 +22,7 @@ use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
-use common_meta::peer::PeerLookupServiceRef;
+use common_meta::peer::{Peer, PeerLookupServiceRef};
 use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
@@ -35,7 +35,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::metasrv::{RegionFailoverDestPeerSelectorRef, SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::{
     RegionMigrationProcedureTask, DEFAULT_REGION_MIGRATION_TIMEOUT,
@@ -203,6 +203,11 @@ pub type RegionSupervisorRef = Arc<RegionSupervisor>;
 /// The default tick interval.
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
+pub enum RegionSupervisorSelector {
+    Selector(SelectorRef),
+    FailoverSelector(RegionFailoverDestPeerSelectorRef),
+}
+
 /// The [`RegionSupervisor`] is used to detect Region failures
 /// and initiate Region failover upon detection, ensuring uninterrupted region service.
 pub struct RegionSupervisor {
@@ -215,7 +220,7 @@ pub struct RegionSupervisor {
     /// The context of [`SelectorRef`]
     selector_context: SelectorContext,
     /// Candidate node selector.
-    selector: SelectorRef,
+    selector: RegionSupervisorSelector,
     /// Region migration manager.
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
@@ -288,7 +293,7 @@ impl RegionSupervisor {
         event_receiver: Receiver<Event>,
         options: PhiAccrualFailureDetectorOptions,
         selector_context: SelectorContext,
-        selector: SelectorRef,
+        selector: RegionSupervisorSelector,
         region_migration_manager: RegionMigrationManagerRef,
         maintenance_mode_manager: MaintenanceModeManagerRef,
         peer_lookup: PeerLookupServiceRef,
@@ -375,9 +380,27 @@ impl RegionSupervisor {
         }
 
         warn!("Detects region failures: {:?}", regions);
+        let mut grouped_regions: HashMap<u64, Vec<RegionId>> =
+            HashMap::with_capacity(regions.len());
         for (datanode_id, region_id) in regions {
-            if let Err(err) = self.do_failover(datanode_id, region_id).await {
-                error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
+            grouped_regions
+                .entry(datanode_id)
+                .or_default()
+                .push(region_id);
+        }
+
+        for (datanode_id, regions) in grouped_regions {
+            match self.generate_failover_tasks(datanode_id, &regions).await {
+                Ok(tasks) => {
+                    for task in tasks {
+                        let region_id = task.region_id;
+                        let datanode_id = task.from_peer.id;
+                        if let Err(err) = self.do_failover(task).await {
+                            error!(err; "Failed to execute region failover for region: {}, datanode: {}", region_id, datanode_id);
+                        }
+                    }
+                }
+                Err(err) => error!(err; "Failed to generate failover tasks"),
             }
         }
     }
@@ -389,12 +412,42 @@ impl RegionSupervisor {
             .context(error::MaintenanceModeManagerSnafu)
     }
 
-    async fn do_failover(&mut self, datanode_id: DatanodeId, region_id: RegionId) -> Result<()> {
-        let count = *self
-            .failover_counts
-            .entry((datanode_id, region_id))
-            .and_modify(|count| *count += 1)
-            .or_insert(1);
+    async fn select_peers(
+        &self,
+        datanode_id: DatanodeId,
+        regions: &[RegionId],
+    ) -> Result<Vec<(RegionId, Peer)>> {
+        match &self.selector {
+            RegionSupervisorSelector::Selector(selector) => {
+                let opt = SelectorOptions {
+                    min_required_items: regions.len(),
+                    allow_duplication: true,
+                    exclude_peer_ids: HashSet::from([datanode_id]),
+                };
+                let peers = selector.select(&self.selector_context, opt).await?;
+                // TODO(weny): assumes the length of peers is equal to regions.
+                let region_peers = regions
+                    .iter()
+                    .zip(peers)
+                    .map(|(region_id, peer)| (*region_id, peer))
+                    .collect::<Vec<_>>();
+
+                Ok(region_peers)
+            }
+            RegionSupervisorSelector::FailoverSelector(selector) => {
+                selector
+                    .select(&self.selector_context, datanode_id, regions.to_vec())
+                    .await
+            }
+        }
+    }
+
+    async fn generate_failover_tasks(
+        &mut self,
+        datanode_id: DatanodeId,
+        regions: &[RegionId],
+    ) -> Result<Vec<RegionMigrationProcedureTask>> {
+        let mut tasks = Vec::with_capacity(regions.len());
         let from_peer = self
             .peer_lookup
             .datanode(datanode_id)
@@ -405,33 +458,35 @@ impl RegionSupervisor {
             .context(error::PeerUnavailableSnafu {
                 peer_id: datanode_id,
             })?;
-        let mut peers = self
-            .selector
-            .select(
-                &self.selector_context,
-                SelectorOptions {
-                    min_required_items: 1,
-                    allow_duplication: false,
-                    exclude_peer_ids: HashSet::from([from_peer.id]),
-                },
-            )
-            .await?;
-        let to_peer = peers.remove(0);
-        if to_peer.id == from_peer.id {
-            warn!(
-                "Skip failover for region: {region_id}, from_peer: {from_peer}, trying to failover to the same peer."
-            );
-            return Ok(());
+
+        let region_peers = self.select_peers(datanode_id, regions).await?;
+
+        for (region_id, peer) in region_peers {
+            let count = *self
+                .failover_counts
+                .entry((datanode_id, region_id))
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            let task = RegionMigrationProcedureTask {
+                region_id,
+                from_peer: from_peer.clone(),
+                to_peer: peer,
+                timeout: DEFAULT_REGION_MIGRATION_TIMEOUT * count,
+            };
+            tasks.push(task);
         }
+
+        Ok(tasks)
+    }
+
+    async fn do_failover(&mut self, task: RegionMigrationProcedureTask) -> Result<()> {
+        let datanode_id = task.from_peer.id;
+        let region_id = task.region_id;
+
         info!(
-            "Failover for region: {region_id}, from_peer: {from_peer}, to_peer: {to_peer}, tries: {count}"
+            "Failover for region: {}, from_peer: {}, to_peer: {}, timeout: {:?}",
+            task.region_id, task.from_peer, task.to_peer, task.timeout
         );
-        let task = RegionMigrationProcedureTask {
-            region_id,
-            from_peer,
-            to_peer,
-            timeout: DEFAULT_REGION_MIGRATION_TIMEOUT * count,
-        };
 
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
             return match err {
@@ -521,6 +576,7 @@ pub(crate) mod tests {
     use tokio::sync::oneshot;
     use tokio::time::sleep;
 
+    use super::RegionSupervisorSelector;
     use crate::procedure::region_migration::manager::RegionMigrationManager;
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
@@ -548,7 +604,7 @@ pub(crate) mod tests {
                 rx,
                 Default::default(),
                 selector_context,
-                selector,
+                RegionSupervisorSelector::Selector(selector),
                 region_migration_manager,
                 maintenance_mode_manager,
                 peer_lookup,

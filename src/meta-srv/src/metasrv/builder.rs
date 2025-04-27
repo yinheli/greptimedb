@@ -43,6 +43,7 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::warn;
 use snafu::{ensure, ResultExt};
 
+use super::RegionFailoverDestPeerSelectorRef;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
@@ -62,8 +63,8 @@ use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
-    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
-    DEFAULT_TICK_INTERVAL,
+    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
+    RegionSupervisorTicker, DEFAULT_TICK_INTERVAL,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -320,13 +321,21 @@ impl MetasrvBuilder {
             ),
         ));
         region_migration_manager.try_start()?;
+        let region_supervisor_selector = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<RegionFailoverDestPeerSelectorRef>());
+
+        let supervisor_selector = match region_supervisor_selector {
+            Some(selector) => RegionSupervisorSelector::FailoverSelector(selector),
+            None => RegionSupervisorSelector::Selector(selector.clone()),
+        };
 
         let region_failover_handler = if options.enable_region_failover {
             let region_supervisor = RegionSupervisor::new(
                 rx,
                 options.failure_detector,
                 selector_ctx.clone(),
-                selector.clone(),
+                supervisor_selector,
                 region_migration_manager.clone(),
                 maintenance_mode_manager.clone(),
                 peer_lookup_service.clone(),
