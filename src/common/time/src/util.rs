@@ -85,7 +85,8 @@ pub(crate) fn div_ceil(this: i64, rhs: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{self, SystemTime};
+    use std::thread::sleep;
+    use std::time::{self, Duration, SystemTime};
 
     use chrono::{Datelike, TimeZone, Timelike};
 
@@ -107,6 +108,12 @@ mod tests {
         assert_eq!(datetime_std.day(), datetime_now.day());
         assert_eq!(datetime_std.hour(), datetime_now.hour());
         assert_eq!(datetime_std.minute(), datetime_now.minute());
+
+        let now = current_time_millis();
+        sleep(Duration::from_secs(1));
+        let after_1secs = current_time_millis();
+        let elapsed = Duration::from_millis((after_1secs - now) as u64);
+        assert_eq!(elapsed.as_secs(), 1);
     }
 
     #[test]

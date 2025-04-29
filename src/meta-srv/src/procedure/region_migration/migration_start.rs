@@ -17,6 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -141,6 +142,13 @@ impl RegionMigrationStart {
             })?
             .id
             != from_peer.id;
+        info!(
+            "Abort region migration, region:{:?}, unexpected leader peer: {}, expected: {:?}, actual: {:?}",
+            region_route.region.id,
+            region_route.leader_peer,
+            from_peer,
+            region_route.leader_peer
+        );
         Ok(is_invalid_leader_peer)
     }
 
@@ -160,6 +168,10 @@ impl RegionMigrationStart {
             })?
             .id
             == to_peer.id;
+        info!(
+            "Region migration has been completed, region: {:?}, to_peer: {:?}",
+            region_route.region.id, to_peer
+        );
 
         Ok(region_opened)
     }

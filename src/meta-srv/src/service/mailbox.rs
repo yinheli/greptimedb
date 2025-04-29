@@ -141,6 +141,9 @@ pub trait Mailbox: Send + Sync {
     async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()>;
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;
+
+    /// Returns unix timestamp that the pusher deregistered.
+    async fn tombstone(&self, ch: &Channel) -> Option<i64>;
 }
 
 #[cfg(test)]

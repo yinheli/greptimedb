@@ -16,12 +16,14 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{error, info, warn};
+use common_time::util::current_time_millis;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::{sleep, Instant};
@@ -66,19 +68,32 @@ impl State for DowngradeLeaderRegion {
         match self.downgrade_region_with_retry(ctx).await {
             Ok(_) => {
                 // Do nothing
+                info!(
+                    "Downgraded region leader success, region: {}",
+                    ctx.persistent_ctx.region_id
+                );
             }
             Err(error::Error::ExceededDeadline { .. }) => {
+                info!(
+                    "Downgrade region leader exceeded deadline, region: {}",
+                    ctx.persistent_ctx.region_id
+                );
                 // Rollbacks the metadata if procedure is timeout
                 return Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)));
             }
             Err(err) => {
-                error!(err; "Occurs non-retryable error");
+                error!(err; "Occurs non-retryable error, region: {}", ctx.persistent_ctx.region_id);
                 if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
                     info!(
-                        "Running into the downgrade leader slow path, sleep until {:?}",
-                        deadline
+                        "Running into the downgrade region leader slow path, region: {}, sleep until {:?}",
+                        ctx.persistent_ctx.region_id, deadline
                     );
                     tokio::time::sleep_until(*deadline).await;
+                } else {
+                    warn!(
+                        "Leader region lease deadline is not set, region: {}",
+                        ctx.persistent_ctx.region_id
+                    );
                 }
             }
         }
@@ -220,6 +235,51 @@ impl DowngradeLeaderRegion {
         }
     }
 
+    async fn update_region_lease_deadline_via_pusher_tombstone(&self, ctx: &mut Context) {
+        let leader = &ctx.persistent_ctx.from_peer;
+        let ch = &Channel::Datanode(leader.id);
+
+        if let Some(pusher_disconnected_at) = ctx.mailbox.tombstone(ch).await {
+            let now = current_time_millis();
+            let elapsed = now - pusher_disconnected_at;
+            let region_lease = Duration::from_secs(REGION_LEASE_SECS);
+
+            // It's safe to update the region leader lease deadline here because:
+            // 1. The old region leader has already been marked as downgraded in metadata,
+            //    which means any attempts to renew its lease will be rejected.
+            // 2. The pusher tombstone record only gets removed when the datanode (from_peer)
+            //    establishes a new heartbeat connection stream.
+            if elapsed >= (REGION_LEASE_SECS * 1000) as i64 {
+                ctx.volatile_ctx.reset_leader_region_lease_deadline();
+                info!(
+                    "Pusher tombstone for datanode {} has been disconnected for more than region lease period ({:?}), reset leader region lease deadline to None, region: {}", 
+                    leader,
+                    region_lease,
+                    ctx.persistent_ctx.region_id
+                );
+            } else if elapsed > 0 {
+                let deadline =
+                    region_lease - Duration::from_millis((now - pusher_disconnected_at) as u64);
+                ctx.volatile_ctx.reset_leader_region_lease_deadline();
+                ctx.volatile_ctx.set_leader_region_lease_deadline(deadline);
+                info!(
+                    "Found pusher tombstone for datanode {}(ts: {}), elapsed: {:?}, updated leader region lease deadline to {:?}, region: {}",
+                    leader, pusher_disconnected_at, elapsed, ctx.volatile_ctx.leader_region_lease_deadline, ctx.persistent_ctx.region_id
+                );
+            } else {
+                warn!(
+                    "Found pusher tombstone for datanode {} with invalid timestamp: {}, current time: {}, region: {}",
+                    leader, pusher_disconnected_at, now, ctx.persistent_ctx.region_id
+                )
+            }
+        } else {
+            warn!(
+                "Not found pusher tomstone for datanode {}, region: {}",
+                leader, ctx.persistent_ctx.region_id
+            )
+        }
+    }
+
     /// Downgrades a leader region.
     ///
     /// Fast path:
@@ -240,13 +300,21 @@ impl DowngradeLeaderRegion {
                 retry += 1;
                 // Throws the error immediately if the procedure exceeded the deadline.
                 if matches!(err, error::Error::ExceededDeadline { .. }) {
+                    error!(err; "Failed to downgrade region leader, region: {}, exceeded deadline", ctx.persistent_ctx.region_id);
+                    return Err(err);
+                } else if matches!(err, error::Error::PusherNotFound { .. }) {
+                    // Throws the error immediately if the datanode is unreachable.
+                    error!(err; "Failed to downgrade region leader, region: {}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_id, ctx.persistent_ctx.from_peer.id);
+                    self.update_region_lease_deadline_via_pusher_tombstone(ctx)
+                        .await;
                     return Err(err);
                 } else if err.is_retryable() && retry < self.optimistic_retry {
-                    error!("Failed to downgrade region, error: {err:?}, retry later");
+                    error!(err; "Failed to downgrade region leader, region: {}, retry later", ctx.persistent_ctx.region_id);
                     sleep(self.retry_initial_interval).await;
                 } else {
-                    error!("Failed to downgrade region, error: {err:?}");
-                    break;
+                    return Err(BoxedError::new(err)).context(error::DowngradeLeaderSnafu {
+                        region_id: ctx.persistent_ctx.region_id,
+                    })?;
                 }
             } else {
                 ctx.update_operations_elapsed(timer);

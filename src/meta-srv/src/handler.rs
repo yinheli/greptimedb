@@ -35,6 +35,7 @@ use common_meta::datanode::Stat;
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, warn};
+use common_time::util::current_time_millis;
 use dashmap::DashMap;
 use extract_stat_handler::ExtractStatHandler;
 use failure_handler::RegionFailureHandler;
@@ -182,15 +183,51 @@ impl Pusher {
 
 /// The group of heartbeat pushers.
 #[derive(Clone, Default)]
-pub struct Pushers(Arc<RwLock<BTreeMap<String, Pusher>>>);
+pub struct Pushers {
+    inner: Arc<RwLock<PusherInner>>,
+}
+
+#[derive(Default)]
+struct PusherInner {
+    pushers: BTreeMap<String, Pusher>,
+    pusher_tombstones: BTreeMap<String, i64>,
+}
+
+impl PusherInner {
+    fn insert(&mut self, pusher_id: PusherId, pusher: Pusher) -> Option<Pusher> {
+        let key = pusher_id.string_key();
+        self.pusher_tombstones.remove(&key);
+        self.pushers.insert(key, pusher)
+    }
+
+    fn remove(&mut self, pusher_id: PusherId) -> Option<Pusher> {
+        let key = pusher_id.string_key();
+        let pusher = self.pushers.remove(&key);
+        if pusher.is_some() {
+            self.pusher_tombstones.insert(key, current_time_millis());
+        }
+        pusher
+    }
+
+    fn get(&self, pusher_id: PusherId) -> Option<&Pusher> {
+        let key = pusher_id.string_key();
+        self.pushers.get(&key)
+    }
+
+    fn get_tombstone(&self, pusher_id: PusherId) -> Option<i64> {
+        let key = pusher_id.string_key();
+        self.pusher_tombstones.get(&key).cloned()
+    }
+}
 
 impl Pushers {
     async fn push(&self, pusher_id: PusherId, mailbox_message: MailboxMessage) -> Result<()> {
-        let pusher_id = pusher_id.string_key();
-        let pushers = self.0.read().await;
+        let pushers = self.inner.read().await;
         let pusher = pushers
-            .get(&pusher_id)
-            .context(error::PusherNotFoundSnafu { pusher_id })?;
+            .get(pusher_id)
+            .with_context(|| error::PusherNotFoundSnafu {
+                pusher_id: pusher_id.to_string(),
+            })?;
         pusher
             .push(HeartbeatResponse {
                 header: Some(pusher.header()),
@@ -205,8 +242,9 @@ impl Pushers {
         range: Range<String>,
         mailbox_message: &MailboxMessage,
     ) -> Result<()> {
-        let pushers = self.0.read().await;
-        let pushers = pushers
+        let inner = self.inner.read().await;
+        let pushers = inner
+            .pushers
             .range(range)
             .map(|(_, value)| value)
             .collect::<Vec<_>>();
@@ -232,12 +270,12 @@ impl Pushers {
         Ok(())
     }
 
-    pub(crate) async fn insert(&self, pusher_id: String, pusher: Pusher) -> Option<Pusher> {
-        self.0.write().await.insert(pusher_id, pusher)
+    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> Option<Pusher> {
+        self.inner.write().await.insert(pusher_id, pusher)
     }
 
-    async fn remove(&self, pusher_id: &str) -> Option<Pusher> {
-        self.0.write().await.remove(pusher_id)
+    async fn remove(&self, pusher_id: PusherId) -> Option<Pusher> {
+        self.inner.write().await.remove(pusher_id)
     }
 }
 
@@ -269,7 +307,7 @@ impl HeartbeatHandlerGroup {
     pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
         METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
         info!("Pusher register: {}", pusher_id);
-        let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
+        let _ = self.pushers.insert(pusher_id, pusher).await;
     }
 
     /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
@@ -278,7 +316,7 @@ impl HeartbeatHandlerGroup {
     pub async fn deregister_push(&self, pusher_id: PusherId) -> Option<Pusher> {
         METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         info!("Pusher unregister: {}", pusher_id);
-        self.pushers.remove(&pusher_id.string_key()).await
+        self.pushers.remove(pusher_id).await
     }
 
     /// Returns the [`Pushers`] of the group.
@@ -481,6 +519,11 @@ impl Mailbox for HeartbeatMailbox {
         }
 
         Ok(())
+    }
+
+    async fn tombstone(&self, ch: &Channel) -> Option<i64> {
+        let pusher_id = ch.pusher_id();
+        self.pushers.inner.read().await.get_tombstone(pusher_id)
     }
 }
 
