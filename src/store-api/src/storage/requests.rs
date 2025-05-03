@@ -53,9 +53,20 @@ pub struct ScanRequest {
     /// Optional hint to select rows from time-series.
     pub series_row_selector: Option<TimeSeriesRowSelector>,
     /// Optional constraint on the sequence number of the rows to read.
-    /// If set, only rows with a sequence number lesser or equal to this value
-    /// will be returned.
-    pub sequence: Option<SequenceNumber>,
+    /// This should be treated as a left-open-right-close range: `(min_sequence, max_sequence]`.
+    pub sequence: (Option<SequenceNumber>, Option<SequenceNumber>),
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
+}
+
+impl ScanRequest {
+    /// The minimal sequence this [ScanRequest] is expected to be exceeded (greater than only).
+    pub fn min_sequence(&self) -> Option<SequenceNumber> {
+        self.sequence.0
+    }
+
+    /// The maximal sequence this [ScanRequest] is expected to be not exceeded (lesser than or equal).
+    pub fn max_sequence(&self) -> Option<SequenceNumber> {
+        self.sequence.1
+    }
 }

@@ -34,6 +34,7 @@ pub type ServerHandler = (Box<dyn Server>, SocketAddr);
 /// [ServerHandlers] is used to manage the lifecycle of all the services like http or grpc in the GreptimeDB server.
 #[derive(Clone, Default)]
 pub struct ServerHandlers {
+    // TODO(LFC): Make the lock using std, to avoid async propagation.
     handlers: Arc<RwLock<HashMap<String, ServerHandler>>>,
 }
 

@@ -111,29 +111,14 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use crate::Mode;
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, Default)]
     struct TestDatanodeConfig {
-        mode: Mode,
         node_id: Option<u64>,
         logging: LoggingOptions,
         meta_client: Option<MetaClientOptions>,
         wal: DatanodeWalConfig,
         storage: StorageConfig,
-    }
-
-    impl Default for TestDatanodeConfig {
-        fn default() -> Self {
-            Self {
-                mode: Mode::Distributed,
-                node_id: None,
-                logging: LoggingOptions::default(),
-                meta_client: None,
-                wal: DatanodeWalConfig::default(),
-                storage: StorageConfig::default(),
-            }
-        }
     }
 
     impl Configurable for TestDatanodeConfig {

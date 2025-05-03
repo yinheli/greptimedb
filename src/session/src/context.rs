@@ -44,10 +44,7 @@ const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
-    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
-    /// container data that was committed before(and include) the given sequence number
-    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
-    snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
+    sequences: Option<Arc<RwLock<Sequences>>>,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
@@ -62,6 +59,33 @@ pub struct QueryContext {
     // Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
+}
+
+/// The range of sequences to scan.
+#[derive(Debug, Default, Clone)]
+struct Sequences {
+    /// Mappings of RegionId to maximum (inclusive) sequence to scan.
+    max_sequences: HashMap<u64, u64>,
+    /// Mappings of RegionId to minimal (exclusive) sequence to scan.
+    min_sequences: HashMap<u64, u64>,
+}
+
+impl From<api::v1::Sequences> for Sequences {
+    fn from(value: api::v1::Sequences) -> Self {
+        Self {
+            max_sequences: value.max_sequences,
+            min_sequences: value.min_sequences,
+        }
+    }
+}
+
+impl From<Sequences> for api::v1::Sequences {
+    fn from(value: Sequences) -> Self {
+        Self {
+            max_sequences: value.max_sequences,
+            min_sequences: value.min_sequences,
+        }
+    }
 }
 
 /// This fields hold data that is only valid to current query context
@@ -135,9 +159,11 @@ impl From<&RegionRequestHeader> for QueryContext {
                 .timezone(parse_timezone(Some(&ctx.timezone)))
                 .extensions(ctx.extensions.clone())
                 .channel(ctx.channel.into())
-                .snapshot_seqs(Arc::new(RwLock::new(
-                    ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
-                )))
+                .sequences(
+                    ctx.sequences
+                        .as_ref()
+                        .map(|x| Arc::new(RwLock::new(x.clone().into()))),
+                )
                 .explain_options(ctx.explain);
         }
         builder.build()
@@ -152,9 +178,7 @@ impl From<api::v1::QueryContext> for QueryContext {
             .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
             .channel(ctx.channel.into())
-            .snapshot_seqs(Arc::new(RwLock::new(
-                ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
-            )))
+            .sequences(ctx.sequences.map(|x| Arc::new(RwLock::new(x.into()))))
             .explain_options(ctx.explain)
             .build()
     }
@@ -167,7 +191,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             mutable_session_data: mutable_inner,
             extensions,
             channel,
-            snapshot_seqs,
+            sequences,
             mutable_query_context_data,
             ..
         }: QueryContext,
@@ -180,9 +204,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             timezone: mutable_inner.timezone.to_string(),
             extensions,
             channel: channel as u32,
-            snapshot_seqs: Some(api::v1::SnapshotSequences {
-                snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
-            }),
+            sequences: sequences.as_ref().map(|x| x.read().unwrap().clone().into()),
             explain,
         }
     }
@@ -399,12 +421,16 @@ impl QueryContext {
         rb.cloned()
     }
 
-    pub fn snapshots(&self) -> HashMap<u64, u64> {
-        self.snapshot_seqs.read().unwrap().clone()
-    }
-
-    pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
-        self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
+    /// Finds the if present minimal (exclusive) and maximal (inclusive) sequences to scan for a region.
+    pub fn sequences(&self, region_id: u64) -> (Option<u64>, Option<u64>) {
+        if let Some(sequence) = self.sequences.as_ref() {
+            let sequence = sequence.read().unwrap();
+            let min = sequence.min_sequences.get(&region_id).cloned();
+            let max = sequence.max_sequences.get(&region_id).cloned();
+            (min, max)
+        } else {
+            (None, None)
+        }
     }
 
     /// Returns `true` if the session can cast strings to numbers in MySQL style.
@@ -420,7 +446,7 @@ impl QueryContextBuilder {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
+            sequences: self.sequences.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self

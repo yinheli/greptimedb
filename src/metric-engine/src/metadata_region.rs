@@ -350,7 +350,7 @@ impl MetadataRegion {
             output_ordering: None,
             limit: None,
             series_row_selector: None,
-            sequence: None,
+            sequence: (None, None),
             distribution: None,
         }
     }
@@ -540,7 +540,7 @@ impl MetadataRegion {
             output_ordering: None,
             limit: None,
             series_row_selector: None,
-            sequence: None,
+            sequence: (None, None),
             distribution: None,
         };
         let record_batch_stream = self
