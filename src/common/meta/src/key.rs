@@ -861,7 +861,13 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.create(keys).await
+        self.tombstone_manager.create(keys).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
+        Ok(())
     }
 
     /// Deletes metadata tombstone for table **permanently**.
@@ -875,7 +881,13 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let table_metadata_keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.delete(table_metadata_keys).await
+        self.tombstone_manager.delete(table_metadata_keys).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
+        Ok(())
     }
 
     /// Restores metadata for table.
@@ -889,7 +901,13 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.restore(keys).await
+        self.tombstone_manager.restore(keys).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
+        Ok(())
     }
 
     /// Deletes metadata for table **permanently**.
@@ -907,6 +925,11 @@ impl TableMetadataManager {
             .kv_backend
             .batch_delete(BatchDeleteRequest::new().with_keys(keys))
             .await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
         Ok(())
     }
 
@@ -981,6 +1004,11 @@ impl TableMetadataManager {
         let txn = Txn::merge_all(vec![update_table_name_txn, update_table_info_txn]);
 
         let mut r = self.kv_backend.txn(txn).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
@@ -1028,6 +1056,11 @@ impl TableMetadataManager {
         };
 
         let mut r = self.kv_backend.txn(txn).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
         // Checks whether metadata was already updated.
         if !r.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
@@ -1113,8 +1146,10 @@ impl TableMetadataManager {
         }
         let mut on_failures = Vec::with_capacity(len);
 
+        let mut table_ids = Vec::with_capacity(len);
         for (table_info_value, new_table_info) in table_info_value_pairs {
             let table_id = table_info_value.table_info.ident.table_id;
+            table_ids.push(table_id);
 
             let new_table_info_value = table_info_value.update(new_table_info);
 
@@ -1135,6 +1170,13 @@ impl TableMetadataManager {
 
         let txn = Txn::merge_all(txns);
         let mut r = self.kv_backend.txn(txn).await?;
+        for table_id in table_ids {
+            self.table_route_manager()
+                .table_route_storage()
+                .table_route_object_cache()
+                .invalidate(table_id)
+                .await;
+        }
 
         if !r.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
@@ -1187,6 +1229,11 @@ impl TableMetadataManager {
         let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
 
         let mut r = self.kv_backend.txn(txn).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
@@ -1239,6 +1286,11 @@ impl TableMetadataManager {
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let mut r = self.kv_backend.txn(update_table_route_txn).await?;
+        self.table_route_manager()
+            .table_route_storage()
+            .table_route_object_cache()
+            .invalidate(table_id)
+            .await;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {

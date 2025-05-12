@@ -108,4 +108,10 @@ lazy_static! {
         &["name"]
     )
     .unwrap();
+    /// Meta object cache hit counter.
+    pub static ref METRIC_META_OBJECT_CACHE_HIT: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_object_cache_hit", "meta object cache hit", &["type"]).unwrap();
+    /// Meta object cache miss counter.
+    pub static ref METRIC_META_OBJECT_CACHE_MISS: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_object_cache_miss", "meta object cache miss", &["type"]).unwrap();
 }

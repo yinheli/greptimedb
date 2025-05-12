@@ -517,6 +517,13 @@ impl Metasrv {
                 self.options.node_max_idle_time,
                 self.in_memory.clone(),
             )));
+            leadership_change_notifier.add_listener(
+                self.table_metadata_manager
+                    .table_route_manager()
+                    .table_route_storage()
+                    .table_route_object_cache()
+                    .clone(),
+            );
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
             }

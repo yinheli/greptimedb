@@ -16,10 +16,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
+use tokio::sync::RwLock;
 
 use crate::error::{
     InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
@@ -33,6 +35,8 @@ use crate::key::{
 };
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::leadership_notifier::LeadershipChangeListener;
+use crate::metrics::{METRIC_META_OBJECT_CACHE_HIT, METRIC_META_OBJECT_CACHE_MISS};
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::rpc::store::BatchGetRequest;
 
@@ -445,16 +449,102 @@ impl TableRouteManager {
     }
 }
 
+pub type TableRouteObjectCacheRef = Arc<TableRouteObjectCache>;
+
+pub struct TableRouteObjectCache {
+    cache: Arc<RwLock<HashMap<TableId, TableRouteValue>>>,
+    node_address_mapper: NodeAddressMapperRef,
+    kv_backend: KvBackendRef,
+}
+
+#[async_trait::async_trait]
+impl LeadershipChangeListener for TableRouteObjectCache {
+    fn name(&self) -> &str {
+        "TableRouteObjectCache"
+    }
+
+    async fn on_leader_start(&self) -> Result<()> {
+        info!("Clearing table route object cache on leader start");
+        self.cache.write().await.clear();
+        Ok(())
+    }
+
+    async fn on_leader_stop(&self) -> Result<()> {
+        info!("Clearing table route object cache on leader stop");
+        self.cache.write().await.clear();
+        Ok(())
+    }
+}
+
+impl TableRouteObjectCache {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        let node_address_mapper = Arc::new(NodeAddressMapper::new(kv_backend.clone()));
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            node_address_mapper,
+            kv_backend,
+        }
+    }
+
+    pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
+        let mut output = Vec::with_capacity(table_ids.len());
+        let mut not_found = Vec::new();
+        {
+            let cache = self.cache.read().await;
+            for table_id in table_ids {
+                if let Some(table_route) = cache.get(table_id) {
+                    output.push(Some(table_route.clone()));
+                    METRIC_META_OBJECT_CACHE_HIT
+                        .with_label_values(&["table_route"])
+                        .inc();
+                } else {
+                    not_found.push(*table_id);
+                    METRIC_META_OBJECT_CACHE_MISS
+                        .with_label_values(&["table_route"])
+                        .inc();
+                }
+            }
+        }
+
+        if not_found.is_empty() {
+            return Ok(output);
+        }
+
+        let table_routes =
+            batch_get_table_routes(&self.kv_backend, &self.node_address_mapper, &not_found).await?;
+        let mut cache = self.cache.write().await;
+        for (table_id, table_route) in not_found.into_iter().zip(table_routes) {
+            if let Some(table_route) = &table_route {
+                cache.insert(table_id, table_route.clone());
+            }
+            output.push(table_route);
+        }
+
+        Ok(output)
+    }
+
+    pub async fn invalidate(&self, table_id: TableId) {
+        let mut cache = self.cache.write().await;
+        cache.remove(&table_id);
+    }
+}
+
 /// Low-level operations of [TableRouteValue].
 pub struct TableRouteStorage {
     kv_backend: KvBackendRef,
+    cache: TableRouteObjectCacheRef,
 }
 
 pub type TableRouteValueDecodeResult = Result<Option<DeserializedValueWithBytes<TableRouteValue>>>;
 
 impl TableRouteStorage {
     pub fn new(kv_backend: KvBackendRef) -> Self {
-        Self { kv_backend }
+        let cache = Arc::new(TableRouteObjectCache::new(kv_backend.clone()));
+        Self { kv_backend, cache }
+    }
+
+    pub fn table_route_object_cache(&self) -> &TableRouteObjectCacheRef {
+        &self.cache
     }
 
     /// Builds a create table route transaction,
@@ -550,36 +640,84 @@ impl TableRouteStorage {
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
-        let mut table_routes = self.batch_get_inner(table_ids).await?;
-        self.remap_routes_addresses(&mut table_routes).await?;
-
-        Ok(table_routes)
+        self.cache.batch_get(table_ids).await
     }
 
-    async fn batch_get_inner(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
-        let keys = table_ids
-            .iter()
-            .map(|id| TableRouteKey::new(*id).to_bytes())
-            .collect::<Vec<_>>();
-        let resp = self
-            .kv_backend
-            .batch_get(BatchGetRequest { keys: keys.clone() })
-            .await?;
+    async fn remap_route_address(&self, table_route: &mut TableRouteValue) -> Result<()> {
+        let keys = extract_address_keys(table_route).into_iter().collect();
+        let node_addrs = self.get_node_addresses(keys).await?;
+        set_addresses(&node_addrs, table_route)?;
 
-        let kvs = resp
+        Ok(())
+    }
+
+    async fn get_node_addresses(
+        &self,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<HashMap<u64, NodeAddressValue>> {
+        if keys.is_empty() {
+            return Ok(HashMap::default());
+        }
+
+        self.kv_backend
+            .batch_get(BatchGetRequest { keys })
+            .await?
             .kvs
             .into_iter()
-            .map(|kv| (kv.key, kv.value))
-            .collect::<HashMap<_, _>>();
-        keys.into_iter()
-            .map(|key| {
-                if let Some(value) = kvs.get(&key) {
-                    Ok(Some(TableRouteValue::try_from_raw_value(value)?))
-                } else {
-                    Ok(None)
-                }
+            .map(|kv| {
+                let node_id = NodeAddressKey::from_bytes(&kv.key)?.node_id;
+                let node_addr = NodeAddressValue::try_from_raw_value(&kv.value)?;
+                Ok((node_id, node_addr))
             })
             .collect()
+    }
+}
+
+async fn batch_get_table_routes(
+    kv_backend: &KvBackendRef,
+    node_address_mapper: &NodeAddressMapperRef,
+    table_ids: &[TableId],
+) -> Result<Vec<Option<TableRouteValue>>> {
+    let keys = table_ids
+        .iter()
+        .map(|id| TableRouteKey::new(*id).to_bytes())
+        .collect::<Vec<_>>();
+    let resp = kv_backend
+        .batch_get(BatchGetRequest { keys: keys.clone() })
+        .await?;
+
+    let kvs = resp
+        .kvs
+        .into_iter()
+        .map(|kv| (kv.key, kv.value))
+        .collect::<HashMap<_, _>>();
+    let mut table_routes = keys
+        .into_iter()
+        .map(|key| {
+            if let Some(value) = kvs.get(&key) {
+                Ok(Some(TableRouteValue::try_from_raw_value(value)?))
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    node_address_mapper
+        .remap_routes_addresses(&mut table_routes)
+        .await?;
+
+    Ok(table_routes)
+}
+
+pub type NodeAddressMapperRef = Arc<NodeAddressMapper>;
+/// A mapper that remaps the address of the node in the table route.
+pub struct NodeAddressMapper {
+    kv_backend: KvBackendRef,
+}
+
+impl NodeAddressMapper {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        Self { kv_backend }
     }
 
     async fn remap_routes_addresses(
@@ -601,14 +739,6 @@ impl TableRouteStorage {
         for table_route in table_routes.iter_mut().flatten() {
             set_addresses(&node_addrs, table_route)?;
         }
-
-        Ok(())
-    }
-
-    async fn remap_route_address(&self, table_route: &mut TableRouteValue) -> Result<()> {
-        let keys = extract_address_keys(table_route).into_iter().collect();
-        let node_addrs = self.get_node_addresses(keys).await?;
-        set_addresses(&node_addrs, table_route)?;
 
         Ok(())
     }
